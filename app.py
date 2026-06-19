@@ -29,8 +29,8 @@ def format_datetime(dt_str):
 def main(page: ft.Page):
     page.title = "影院排片执行偏差记录器"
     page.theme_mode = ft.ThemeMode.LIGHT
-    page.window_width = 1200
-    page.window_height = 800
+    page.window.width = 1200
+    page.window.height = 800
     page.padding = 20
     page.scroll = ft.ScrollMode.AUTO
 
@@ -185,8 +185,7 @@ def main(page: ft.Page):
                     sort_column_index=4,
                     sort_ascending=False,
                 ),
-                expand=True,
-                scroll=ft.ScrollMode.AUTO
+                expand=True
             )
         ], expand=True, spacing=15)
 
@@ -503,8 +502,7 @@ def main(page: ft.Page):
                         heading_row_color=ft.colors.BLUE_50,
                         show_bottom_border=True,
                     ),
-                    expand=True,
-                    scroll=ft.ScrollMode.AUTO
+                    expand=True
                 )
             ]
             page.update()
@@ -834,8 +832,7 @@ def main(page: ft.Page):
                     heading_row_color=ft.colors.ORANGE_50,
                     show_bottom_border=True,
                 ) if rows else ft.Text("暂无复查提醒", size=16, color=ft.colors.GREY_700),
-                expand=True,
-                scroll=ft.ScrollMode.AUTO
+                expand=True
             )
         ], expand=True, spacing=15, scroll=ft.ScrollMode.AUTO)
 
