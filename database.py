@@ -106,8 +106,8 @@ def validate_record(data: Dict, record_id: Optional[int] = None) -> Tuple[bool, 
         return False, "计划开场时间格式不正确"
 
     deviation = calculate_deviation(data["planned_start"], data.get("actual_start"))
-    if deviation > 15 and not data.get("adjustment_suggestion"):
-        return False, "偏差超过15分钟时，调整建议不能为空"
+    if deviation <= -15 and not data.get("adjustment_suggestion"):
+        return False, "提前15分钟以上时，调整建议不能为空"
 
     if data.get("affects_next") and not data.get("affected_record_no"):
         return False, "当影响下一场时，必须填写受影响场次编号"
@@ -298,7 +298,7 @@ def get_reason_statistics() -> List[Dict]:
         SELECT deviation_reason,
                COUNT(*) as count,
                AVG(ABS(deviation_minutes)) as avg_deviation,
-               SUM(CASE WHEN deviation_minutes > 15 THEN 1 ELSE 0 END) as serious_count
+               SUM(CASE WHEN ABS(deviation_minutes) > 15 THEN 1 ELSE 0 END) as serious_count
         FROM schedule_records
         WHERE deviation_reason IS NOT NULL AND deviation_reason != ''
         GROUP BY deviation_reason

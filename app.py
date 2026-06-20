@@ -2,7 +2,6 @@ import flet as ft
 from datetime import datetime, timedelta
 import pandas as pd
 import plotly.express as px
-import plotly.io as pio
 from database import (
     init_db, get_all_records, create_record, update_record, delete_record,
     get_record_by_id, get_records_by_hall, get_all_halls, get_reason_statistics,
@@ -109,8 +108,23 @@ def main(page: ft.Page):
 
         rows = []
         for rec in records:
-            deviation_color = ft.colors.RED if rec["deviation_minutes"] > 15 else (
-                ft.colors.ORANGE if rec["deviation_minutes"] > 0 else ft.colors.GREEN
+            deviation_color = ft.colors.RED if abs(rec["deviation_minutes"]) > 15 else (
+                ft.colors.ORANGE if rec["deviation_minutes"] != 0 else ft.colors.GREEN
+            )
+            is_serious_advance = rec["deviation_minutes"] <= -15
+            deviation_content = ft.Column(
+                [
+                    ft.Text(str(rec["deviation_minutes"]), color=deviation_color, weight=ft.FontWeight.BOLD),
+                ] + (
+                    [ft.Container(
+                        content=ft.Text("严重偏差", size=10, color=ft.colors.WHITE, weight=ft.FontWeight.BOLD),
+                        padding=ft.padding.symmetric(horizontal=6, vertical=2),
+                        bgcolor=ft.colors.RED,
+                        border_radius=4,
+                    )] if is_serious_advance else []
+                ),
+                spacing=3,
+                tight=True
             )
             rows.append(
                 ft.DataRow(
@@ -137,7 +151,7 @@ def main(page: ft.Page):
                         ft.DataCell(ft.Text(rec["hall_no"])),
                         ft.DataCell(ft.Text(format_datetime(rec["planned_start"]))),
                         ft.DataCell(ft.Text(format_datetime(rec["actual_start"]))),
-                        ft.DataCell(ft.Text(str(rec["deviation_minutes"]), color=deviation_color, weight=ft.FontWeight.BOLD)),
+                        ft.DataCell(deviation_content),
                         ft.DataCell(ft.Text(rec["deviation_reason"] or "-")),
                         ft.DataCell(ft.Text("是" if rec["affects_next"] else "否")),
                         ft.DataCell(
@@ -226,9 +240,9 @@ def main(page: ft.Page):
                 actual_dt = datetime.strptime(actual, "%Y-%m-%d %H:%M").isoformat()
                 dev = calculate_deviation(planned_dt, actual_dt)
                 deviation_minutes_field.value = str(dev)
-                if abs(dev) > 15:
+                if dev <= -15:
                     adjustment_suggestion_field.border_color = ft.colors.RED
-                    adjustment_suggestion_field.label = "调整建议 (偏差超过15分钟，必填)"
+                    adjustment_suggestion_field.label = "调整建议 (提前15分钟以上，必填)"
                 else:
                     adjustment_suggestion_field.border_color = None
                     adjustment_suggestion_field.label = "调整建议"
@@ -346,9 +360,9 @@ def main(page: ft.Page):
                 affected_record_no_field.disabled = not bool(rec["affects_next"])
                 affected_record_no_field.value = rec["affected_record_no"] or ""
                 adjustment_suggestion_field.value = rec["adjustment_suggestion"] or ""
-                if abs(rec["deviation_minutes"]) > 15:
+                if rec["deviation_minutes"] <= -15:
                     adjustment_suggestion_field.border_color = ft.colors.RED
-                    adjustment_suggestion_field.label = "调整建议 (偏差超过15分钟，必填)"
+                    adjustment_suggestion_field.label = "调整建议 (提前15分钟以上，必填)"
 
         content = ft.Column([
             ft.Row([
@@ -418,8 +432,9 @@ def main(page: ft.Page):
                 return
 
             total_delay = sum(1 for r in records if r["deviation_minutes"] > 0)
+            total_advance = sum(1 for r in records if r["deviation_minutes"] < 0)
             avg_deviation = sum(abs(r["deviation_minutes"]) for r in records) / len(records) if records else 0
-            serious_count = sum(1 for r in records if r["deviation_minutes"] > 15)
+            serious_count = sum(1 for r in records if abs(r["deviation_minutes"]) > 15)
 
             columns = [
                 ft.DataColumn(ft.Text("记录编号", weight=ft.FontWeight.BOLD)),
@@ -433,8 +448,8 @@ def main(page: ft.Page):
 
             rows = []
             for rec in records:
-                deviation_color = ft.colors.RED if rec["deviation_minutes"] > 15 else (
-                    ft.colors.ORANGE if rec["deviation_minutes"] > 0 else ft.colors.GREEN
+                deviation_color = ft.colors.RED if abs(rec["deviation_minutes"]) > 15 else (
+                    ft.colors.ORANGE if rec["deviation_minutes"] != 0 else ft.colors.GREEN
                 )
                 rows.append(
                     ft.DataRow(
@@ -550,20 +565,19 @@ def main(page: ft.Page):
                 height=350,
                 width=500
             )
-            html_reason = pio.to_html(fig_reason, full_html=False, include_plotlyjs="cdn")
             charts_row.controls.append(
                 ft.Container(
-                    content=ft.Container(
-                        content=ft.Column([
-                            ft.Markdown("""
-                            <div style="width:100%;height:380px;">
-                            """) + ft.Markdown(html_reason) + ft.Markdown("</div>")
-                        ], spacing=0),
-                        padding=10,
+                    content=ft.Plot(
+                        data=fig_reason.data,
+                        layout=fig_reason.layout,
+                        expand=True
                     ),
+                    padding=10,
                     bgcolor=ft.colors.WHITE,
                     border_radius=10,
                     border=ft.border.all(1, ft.colors.GREY_300),
+                    width=520,
+                    height=380,
                 )
             )
 
@@ -586,18 +600,19 @@ def main(page: ft.Page):
                 height=350,
                 width=500
             )
-            html_time = pio.to_html(fig_time, full_html=False, include_plotlyjs="cdn")
             charts_row.controls.append(
                 ft.Container(
-                    content=ft.Container(
-                        content=ft.Column([
-                            ft.Markdown(html_time)
-                        ], spacing=0),
-                        padding=10,
+                    content=ft.Plot(
+                        data=fig_time.data,
+                        layout=fig_time.layout,
+                        expand=True
                     ),
+                    padding=10,
                     bgcolor=ft.colors.WHITE,
                     border_radius=10,
                     border=ft.border.all(1, ft.colors.GREY_300),
+                    width=520,
+                    height=380,
                 )
             )
 
@@ -619,17 +634,17 @@ def main(page: ft.Page):
                 title_font_size=16,
                 height=350,
             )
-            html_trend = pio.to_html(fig_trend, full_html=False, include_plotlyjs="cdn")
             trend_chart = ft.Container(
-                content=ft.Container(
-                    content=ft.Column([
-                        ft.Markdown(html_trend)
-                    ], spacing=0),
-                    padding=10,
+                content=ft.Plot(
+                    data=fig_trend.data,
+                    layout=fig_trend.layout,
+                    expand=True
                 ),
+                padding=10,
                 bgcolor=ft.colors.WHITE,
                 border_radius=10,
                 border=ft.border.all(1, ft.colors.GREY_300),
+                height=380,
             )
 
         summary_cards = ft.Row([], spacing=20)
@@ -637,7 +652,7 @@ def main(page: ft.Page):
         if all_records:
             total = len(all_records)
             delayed = sum(1 for r in all_records if r["deviation_minutes"] > 0)
-            serious = sum(1 for r in all_records if r["deviation_minutes"] > 15)
+            serious = sum(1 for r in all_records if abs(r["deviation_minutes"]) > 15)
             avg_dev = sum(abs(r["deviation_minutes"]) for r in all_records) / total
 
             summary_cards.controls = [
