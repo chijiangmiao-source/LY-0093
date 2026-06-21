@@ -6,7 +6,9 @@ from database import (
     init_db, get_all_records, create_record, update_record, delete_record,
     get_record_by_id, get_records_by_hall, get_all_halls, get_reason_statistics,
     get_time_slot_statistics, get_daily_deviation_trend, get_review_alerts,
-    calculate_deviation
+    calculate_deviation, get_records_with_filters, update_handling_info,
+    get_hall_completion_rate, get_reason_handling_time, get_incomplete_records,
+    get_handling_trend, get_handling_statistics
 )
 
 
@@ -38,12 +40,14 @@ def main(page: ft.Page):
     current_view = "list"
     editing_record_id = None
     selected_hall = None
+    closure_editing_record_id = None
 
-    def switch_view(view, record_id=None, hall=None):
-        nonlocal current_view, editing_record_id, selected_hall
+    def switch_view(view, record_id=None, hall=None, closure_edit_id=None):
+        nonlocal current_view, editing_record_id, selected_hall, closure_editing_record_id
         current_view = view
         editing_record_id = record_id
         selected_hall = hall
+        closure_editing_record_id = closure_edit_id
         render_page()
 
     def show_snackbar(message, color=ft.colors.BLUE):
@@ -83,6 +87,18 @@ def main(page: ft.Page):
                     icon=ft.icons.WARNING_AMBER,
                     tooltip="复查提醒",
                     on_click=lambda e: switch_view("alerts"),
+                    icon_color=ft.colors.WHITE
+                ),
+                ft.IconButton(
+                    icon=ft.icons.LOOP,
+                    tooltip="闭环管理",
+                    on_click=lambda e: switch_view("closure_management"),
+                    icon_color=ft.colors.WHITE
+                ),
+                ft.IconButton(
+                    icon=ft.icons.DASHBOARD,
+                    tooltip="闭环统计",
+                    on_click=lambda e: switch_view("closure_stats"),
                     icon_color=ft.colors.WHITE
                 ),
             ]
@@ -853,6 +869,566 @@ def main(page: ft.Page):
 
         return content
 
+    def build_closure_management_view():
+        nonlocal closure_editing_record_id
+        halls = get_all_halls()
+        handling_statuses = ["全部", "待处理", "处理中", "已完成"]
+        
+        filter_start_date = ft.TextField(label="开始日期 (YYYY-MM-DD)", width=200)
+        filter_end_date = ft.TextField(label="结束日期 (YYYY-MM-DD)", width=200)
+        filter_hall = ft.Dropdown(
+            label="选择影厅",
+            width=180,
+            value="全部",
+            options=[ft.dropdown.Option("全部")] + [ft.dropdown.Option(h) for h in halls]
+        )
+        filter_movie = ft.TextField(label="影片名称", width=200)
+        filter_status = ft.Dropdown(
+            label="处理状态",
+            width=150,
+            value="全部",
+            options=[ft.dropdown.Option(s) for s in handling_statuses]
+        )
+        
+        records_view = ft.Column([])
+        
+        def get_status_color(status):
+            if status == "已完成":
+                return ft.colors.GREEN
+            elif status == "处理中":
+                return ft.colors.ORANGE
+            else:
+                return ft.colors.RED
+        
+        def load_filtered_records(e=None):
+            start_date = filter_start_date.value.strip() if filter_start_date.value.strip() else None
+            end_date = filter_end_date.value.strip() if filter_end_date.value.strip() else None
+            hall = filter_hall.value if filter_hall.value and filter_hall.value != "全部" else None
+            movie = filter_movie.value.strip() if filter_movie.value.strip() else None
+            status = filter_status.value if filter_status.value and filter_status.value != "全部" else None
+            
+            records = get_records_with_filters(start_date, end_date, hall, movie, status)
+            
+            if not records:
+                records_view.controls = [ft.Text("暂无符合条件的记录", size=16, color=ft.colors.GREY_700)]
+                page.update()
+                return
+            
+            columns = [
+                ft.DataColumn(ft.Text("操作", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("记录编号", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("影片名称", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("影厅", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("计划开场", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("偏差(分钟)", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("偏差原因", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("处理状态", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("责任人", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("处理完成时间", weight=ft.FontWeight.BOLD)),
+            ]
+            
+            rows = []
+            for rec in records:
+                deviation_color = ft.colors.RED if abs(rec["deviation_minutes"]) > 15 else (
+                    ft.colors.ORANGE if rec["deviation_minutes"] != 0 else ft.colors.GREEN
+                )
+                status = rec.get("handling_status") or "待处理"
+                status_color = get_status_color(status)
+                
+                rows.append(
+                    ft.DataRow(
+                        cells=[
+                            ft.DataCell(
+                                ft.Row([
+                                    ft.IconButton(
+                                        ft.icons.EDIT,
+                                        icon_size=20,
+                                        tooltip="处理记录",
+                                        on_click=lambda e, rid=rec["id"]: open_closure_edit_dialog(rid)
+                                    ),
+                                ])
+                            ),
+                            ft.DataCell(ft.Text(rec["record_no"])),
+                            ft.DataCell(ft.Text(rec["movie_name"])),
+                            ft.DataCell(ft.Text(rec["hall_no"])),
+                            ft.DataCell(ft.Text(format_datetime(rec["planned_start"]))),
+                            ft.DataCell(ft.Text(str(rec["deviation_minutes"]), color=deviation_color, weight=ft.FontWeight.BOLD)),
+                            ft.DataCell(ft.Text(rec["deviation_reason"] or "-")),
+                            ft.DataCell(
+                                ft.Container(
+                                    content=ft.Text(status, color=ft.colors.WHITE, size=12, weight=ft.FontWeight.BOLD),
+                                    padding=ft.padding.symmetric(horizontal=8, vertical=4),
+                                    bgcolor=status_color,
+                                    border_radius=4,
+                                )
+                            ),
+                            ft.DataCell(ft.Text(rec.get("responsible_person") or "-")),
+                            ft.DataCell(ft.Text(format_datetime(rec.get("completion_time")) or "-")),
+                        ]
+                    )
+                )
+            
+            records_view.controls = [
+                ft.Container(
+                    content=ft.DataTable(
+                        columns=columns,
+                        rows=rows,
+                        horizontal_lines=ft.BorderSide(1, ft.colors.GREY_300),
+                        vertical_lines=ft.BorderSide(1, ft.colors.GREY_300),
+                        heading_row_color=ft.colors.BLUE_50,
+                        show_bottom_border=True,
+                        sort_column_index=4,
+                        sort_ascending=False,
+                    ),
+                    expand=True
+                )
+            ]
+            page.update()
+        
+        def open_closure_edit_dialog(record_id):
+            rec = get_record_by_id(record_id)
+            if not rec:
+                return
+            
+            status = rec.get("handling_status") or "待处理"
+            person = rec.get("responsible_person") or ""
+            completion = rec.get("completion_time") or ""
+            conclusion = rec.get("review_conclusion") or ""
+            
+            status_dropdown = ft.Dropdown(
+                label="处理状态",
+                width=300,
+                value=status,
+                options=[ft.dropdown.Option(s) for s in ["待处理", "处理中", "已完成"]]
+            )
+            person_field = ft.TextField(label="责任人", width=300, value=person)
+            completion_field = ft.TextField(
+                label="处理完成时间 (YYYY-MM-DD HH:MM)",
+                width=300,
+                value=format_datetime(completion) if completion else ""
+            )
+            conclusion_field = ft.TextField(
+                label="复盘结论",
+                width=600,
+                multiline=True,
+                min_lines=4,
+                value=conclusion
+            )
+            
+            def on_status_change(e):
+                if status_dropdown.value == "已完成" and not completion_field.value.strip():
+                    completion_field.value = datetime.now().strftime("%Y-%m-%d %H:%M")
+                page.update()
+            
+            status_dropdown.on_change = on_status_change
+            
+            def handle_save(e):
+                new_status = status_dropdown.value or "待处理"
+                new_person = person_field.value.strip()
+                new_completion = completion_field.value.strip()
+                new_conclusion = conclusion_field.value.strip()
+                
+                try:
+                    if new_completion:
+                        completion_dt = datetime.strptime(new_completion, "%Y-%m-%d %H:%M").isoformat()
+                    else:
+                        completion_dt = None
+                except ValueError:
+                    show_snackbar("处理完成时间格式错误", ft.colors.RED)
+                    return
+                
+                success, msg = update_handling_info(
+                    record_id, new_status, new_person, completion_dt, new_conclusion
+                )
+                show_snackbar(msg, ft.colors.GREEN if success else ft.colors.RED)
+                if success:
+                    dialog.open = False
+                    page.update()
+                    load_filtered_records()
+            
+            dialog = ft.AlertDialog(
+                title=ft.Row([
+                    ft.Text("偏差处理闭环管理", size=20, weight=ft.FontWeight.BOLD),
+                    ft.Container(expand=True),
+                    ft.Text(f"记录编号: {rec['record_no']}", size=14, color=ft.colors.GREY_600),
+                ]),
+                content=ft.Column([
+                    ft.Row([
+                        ft.Container(
+                            content=ft.Column([
+                                ft.Text("影片名称", size=12, color=ft.colors.GREY_600),
+                                ft.Text(rec["movie_name"], size=16, weight=ft.FontWeight.BOLD),
+                            ]),
+                            padding=10,
+                            bgcolor=ft.colors.BLUE_50,
+                            border_radius=8,
+                            expand=True,
+                        ),
+                        ft.Container(
+                            content=ft.Column([
+                                ft.Text("影厅", size=12, color=ft.colors.GREY_600),
+                                ft.Text(rec["hall_no"], size=16, weight=ft.FontWeight.BOLD),
+                            ]),
+                            padding=10,
+                            bgcolor=ft.colors.BLUE_50,
+                            border_radius=8,
+                            expand=True,
+                        ),
+                        ft.Container(
+                            content=ft.Column([
+                                ft.Text("偏差(分钟)", size=12, color=ft.colors.GREY_600),
+                                ft.Text(str(rec["deviation_minutes"]), size=16, weight=ft.FontWeight.BOLD,
+                                       color=ft.colors.RED if abs(rec["deviation_minutes"]) > 15 else ft.colors.ORANGE),
+                            ]),
+                            padding=10,
+                            bgcolor=ft.colors.BLUE_50,
+                            border_radius=8,
+                            expand=True,
+                        ),
+                    ], spacing=10),
+                    ft.Divider(),
+                    ft.Text("偏差原因", size=12, color=ft.colors.GREY_600),
+                    ft.Text(rec["deviation_reason"] or "未填写", size=14),
+                    ft.Divider(),
+                    ft.Row([status_dropdown, person_field], spacing=20),
+                    ft.Row([completion_field], spacing=20),
+                    ft.Row([conclusion_field], spacing=20),
+                ], spacing=15, scroll=ft.ScrollMode.AUTO),
+                actions=[
+                    ft.TextButton("取消", on_click=lambda e: setattr(dialog, 'open', False) or page.update()),
+                    ft.ElevatedButton("保存", on_click=handle_save, bgcolor=ft.colors.BLUE_700, color=ft.colors.WHITE),
+                ],
+                actions_alignment=ft.MainAxisAlignment.END,
+            )
+            page.dialog = dialog
+            dialog.open = True
+            page.update()
+        
+        def reset_filters(e):
+            filter_start_date.value = ""
+            filter_end_date.value = ""
+            filter_hall.value = "全部"
+            filter_movie.value = ""
+            filter_status.value = "全部"
+            load_filtered_records()
+        
+        search_btn = ft.ElevatedButton(
+            "查询",
+            icon=ft.icons.SEARCH,
+            bgcolor=ft.colors.BLUE_700,
+            color=ft.colors.WHITE,
+            on_click=load_filtered_records
+        )
+        reset_btn = ft.OutlinedButton(
+            "重置",
+            icon=ft.icons.REFRESH,
+            on_click=reset_filters
+        )
+        
+        load_filtered_records()
+        
+        if closure_editing_record_id:
+            page.update()
+            open_closure_edit_dialog(closure_editing_record_id)
+            closure_editing_record_id = None
+        
+        content = ft.Column([
+            ft.Row([
+                ft.Icon(ft.icons.LOOP, color=ft.colors.BLUE_700, size=30),
+                ft.Text("偏差处理闭环管理", size=24, weight=ft.FontWeight.BOLD),
+                ft.Container(expand=True),
+                ft.OutlinedButton("返回列表", icon=ft.icons.ARROW_BACK, on_click=lambda e: switch_view("list")),
+            ], alignment=ft.MainAxisAlignment.START),
+            ft.Divider(),
+            ft.Container(
+                content=ft.Column([
+                    ft.Row([
+                        filter_start_date,
+                        filter_end_date,
+                        filter_hall,
+                        filter_movie,
+                        filter_status,
+                    ], spacing=15, wrap=True),
+                    ft.Row([search_btn, reset_btn], spacing=15),
+                ], spacing=10),
+                padding=20,
+                bgcolor=ft.colors.GREY_50,
+                border_radius=10,
+            ),
+            ft.Divider(),
+            records_view,
+        ], expand=True, spacing=15, scroll=ft.ScrollMode.AUTO)
+        
+        return content
+
+    def build_closure_stats_view():
+        handling_stats = get_handling_statistics()
+        hall_completion = get_hall_completion_rate()
+        reason_handling = get_reason_handling_time()
+        incomplete_records = get_incomplete_records()
+        handling_trend = get_handling_trend()
+        
+        summary_cards = ft.Row([
+            ft.Container(
+                content=ft.Column([
+                    ft.Text("总记录数", size=12, color=ft.colors.GREY_600),
+                    ft.Text(str(handling_stats["total"]), size=28, weight=ft.FontWeight.BOLD, color=ft.colors.BLUE_700),
+                ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                padding=20,
+                bgcolor=ft.colors.BLUE_50,
+                border_radius=10,
+                width=150,
+            ),
+            ft.Container(
+                content=ft.Column([
+                    ft.Text("待处理", size=12, color=ft.colors.GREY_600),
+                    ft.Text(str(handling_stats["pending"]), size=28, weight=ft.FontWeight.BOLD, color=ft.colors.RED),
+                ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                padding=20,
+                bgcolor=ft.colors.RED_50,
+                border_radius=10,
+                width=150,
+            ),
+            ft.Container(
+                content=ft.Column([
+                    ft.Text("处理中", size=12, color=ft.colors.GREY_600),
+                    ft.Text(str(handling_stats["processing"]), size=28, weight=ft.FontWeight.BOLD, color=ft.colors.ORANGE),
+                ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                padding=20,
+                bgcolor=ft.colors.ORANGE_50,
+                border_radius=10,
+                width=150,
+            ),
+            ft.Container(
+                content=ft.Column([
+                    ft.Text("已完成", size=12, color=ft.colors.GREY_600),
+                    ft.Text(str(handling_stats["completed"]), size=28, weight=ft.FontWeight.BOLD, color=ft.colors.GREEN),
+                ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                padding=20,
+                bgcolor=ft.colors.GREEN_50,
+                border_radius=10,
+                width=150,
+            ),
+            ft.Container(
+                content=ft.Column([
+                    ft.Text("完成率", size=12, color=ft.colors.GREY_600),
+                    ft.Text(f"{handling_stats['completion_rate']:.1f}%", size=28, weight=ft.FontWeight.BOLD, color=ft.colors.PURPLE),
+                ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                padding=20,
+                bgcolor=ft.colors.PURPLE_50,
+                border_radius=10,
+                width=150,
+            ),
+            ft.Container(
+                content=ft.Column([
+                    ft.Text("平均处理耗时(分钟)", size=12, color=ft.colors.GREY_600),
+                    ft.Text(f"{handling_stats['avg_handling_time']:.0f}", size=28, weight=ft.FontWeight.BOLD, color=ft.colors.TEAL),
+                ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                padding=20,
+                bgcolor=ft.colors.TEAL_50,
+                border_radius=10,
+                width=180,
+            ),
+        ], spacing=15, scroll=ft.ScrollMode.AUTO)
+        
+        hall_chart = ft.Container()
+        if hall_completion:
+            df_hall = pd.DataFrame(hall_completion)
+            fig_hall = px.bar(
+                df_hall,
+                x="hall_no",
+                y="completion_rate",
+                title="各影厅偏差处理完成率",
+                text_auto='.2f',
+                color="completion_rate",
+                color_continuous_scale="Greens",
+            )
+            fig_hall.update_layout(
+                xaxis_title="影厅",
+                yaxis_title="完成率(%)",
+                yaxis_range=[0, 100],
+                title_font_size=16,
+                height=350,
+                width=500,
+            )
+            hall_chart = ft.Container(
+                content=ft.Plot(
+                    data=fig_hall.data,
+                    layout=fig_hall.layout,
+                    expand=True
+                ),
+                padding=10,
+                bgcolor=ft.colors.WHITE,
+                border_radius=10,
+                border=ft.border.all(1, ft.colors.GREY_300),
+                width=520,
+                height=380,
+            )
+        
+        reason_chart = ft.Container()
+        if reason_handling:
+            df_reason = pd.DataFrame(reason_handling)
+            df_reason = df_reason[df_reason["avg_handling_minutes"].notna()]
+            if not df_reason.empty:
+                fig_reason = px.bar(
+                    df_reason,
+                    x="deviation_reason",
+                    y="avg_handling_minutes",
+                    title="不同原因的处理耗时对比(分钟)",
+                    text_auto='.0f',
+                    color="avg_handling_minutes",
+                    color_continuous_scale="Oranges",
+                )
+                fig_reason.update_layout(
+                    xaxis_title="偏差原因",
+                    yaxis_title="平均处理耗时(分钟)",
+                    title_font_size=16,
+                    height=350,
+                    width=500,
+                )
+                reason_chart = ft.Container(
+                    content=ft.Plot(
+                        data=fig_reason.data,
+                        layout=fig_reason.layout,
+                        expand=True
+                    ),
+                    padding=10,
+                    bgcolor=ft.colors.WHITE,
+                    border_radius=10,
+                    border=ft.border.all(1, ft.colors.GREY_300),
+                    width=520,
+                    height=380,
+                )
+        
+        trend_chart = ft.Container()
+        if handling_trend:
+            df_trend = pd.DataFrame(handling_trend)
+            df_trend = df_trend.sort_values("date")
+            fig_trend = px.line(
+                df_trend,
+                x="date",
+                y=["completed_count", "processing_count", "pending_count"],
+                title="处理趋势(近30天)",
+                markers=True,
+                color_discrete_sequence=["#4CAF50", "#FF9800", "#F44336"],
+            )
+            fig_trend.update_layout(
+                xaxis_title="日期",
+                yaxis_title="记录数",
+                title_font_size=16,
+                legend_title="状态",
+                height=350,
+            )
+            trend_chart = ft.Container(
+                content=ft.Plot(
+                    data=fig_trend.data,
+                    layout=fig_trend.layout,
+                    expand=True
+                ),
+                padding=10,
+                bgcolor=ft.colors.WHITE,
+                border_radius=10,
+                border=ft.border.all(1, ft.colors.GREY_300),
+                height=380,
+            )
+        
+        incomplete_table = ft.Container()
+        if incomplete_records:
+            inc_columns = [
+                ft.DataColumn(ft.Text("记录编号", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("影片名称", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("影厅", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("计划开场", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("偏差(分钟)", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("偏差原因", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("处理状态", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("责任人", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("操作", weight=ft.FontWeight.BOLD)),
+            ]
+            
+            def get_status_color(status):
+                if status == "处理中":
+                    return ft.colors.ORANGE
+                else:
+                    return ft.colors.RED
+            
+            inc_rows = []
+            for rec in incomplete_records:
+                status = rec.get("handling_status") or "待处理"
+                status_color = get_status_color(status)
+                inc_rows.append(
+                    ft.DataRow(
+                        cells=[
+                            ft.DataCell(ft.Text(rec["record_no"])),
+                            ft.DataCell(ft.Text(rec["movie_name"])),
+                            ft.DataCell(ft.Text(rec["hall_no"])),
+                            ft.DataCell(ft.Text(format_datetime(rec["planned_start"]))),
+                            ft.DataCell(ft.Text(str(rec["deviation_minutes"]), color=ft.colors.RED, weight=ft.FontWeight.BOLD)),
+                            ft.DataCell(ft.Text(rec["deviation_reason"] or "-")),
+                            ft.DataCell(
+                                ft.Container(
+                                    content=ft.Text(status, color=ft.colors.WHITE, size=12, weight=ft.FontWeight.BOLD),
+                                    padding=ft.padding.symmetric(horizontal=8, vertical=4),
+                                    bgcolor=status_color,
+                                    border_radius=4,
+                                )
+                            ),
+                            ft.DataCell(ft.Text(rec.get("responsible_person") or "-")),
+                            ft.DataCell(
+                                ft.ElevatedButton(
+                                    "立即处理",
+                                    icon=ft.icons.PLAY_ARROW,
+                                    on_click=lambda e, rid=rec["id"]: switch_view("closure_management", closure_edit_id=rid)
+                                )
+                            ),
+                        ]
+                    )
+                )
+            
+            incomplete_table = ft.Container(
+                content=ft.Column([
+                    ft.Row([
+                        ft.Icon(ft.icons.WARNING_AMBER, color=ft.colors.RED, size=20),
+                        ft.Text(f"未完成记录列表 ({len(incomplete_records)} 条)", size=16, weight=ft.FontWeight.BOLD, color=ft.colors.RED),
+                    ]),
+                    ft.Container(
+                        content=ft.DataTable(
+                            columns=inc_columns,
+                            rows=inc_rows,
+                            horizontal_lines=ft.BorderSide(1, ft.colors.GREY_300),
+                            heading_row_color=ft.colors.RED_50,
+                            show_bottom_border=True,
+                        ),
+                        expand=True,
+                    ),
+                ], spacing=10),
+                padding=15,
+                bgcolor=ft.colors.WHITE,
+                border_radius=10,
+                border=ft.border.all(2, ft.colors.RED_200),
+            )
+        
+        content = ft.Column([
+            ft.Row([
+                ft.Icon(ft.icons.BAR_CHART, color=ft.colors.PURPLE_700, size=30),
+                ft.Text("闭环统计分析", size=24, weight=ft.FontWeight.BOLD),
+                ft.Container(expand=True),
+                ft.OutlinedButton("返回列表", icon=ft.icons.ARROW_BACK, on_click=lambda e: switch_view("list")),
+            ], alignment=ft.MainAxisAlignment.START),
+            ft.Divider(),
+            summary_cards,
+            ft.Divider(),
+            ft.Text("图表展示", size=18, weight=ft.FontWeight.BOLD),
+            ft.Divider(height=5),
+            ft.Row([hall_chart, reason_chart], spacing=20, scroll=ft.ScrollMode.AUTO),
+            ft.Divider(),
+            trend_chart,
+            ft.Divider(),
+            incomplete_table,
+        ], expand=True, spacing=15, scroll=ft.ScrollMode.AUTO)
+        
+        return content
+
     def render_page():
         page.clean()
         page.appbar = build_app_bar()
@@ -867,6 +1443,10 @@ def main(page: ft.Page):
             page.add(build_stats_view())
         elif current_view == "alerts":
             page.add(build_alerts_view())
+        elif current_view == "closure_management":
+            page.add(build_closure_management_view())
+        elif current_view == "closure_stats":
+            page.add(build_closure_stats_view())
 
         page.update()
 

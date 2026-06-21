@@ -31,11 +31,33 @@ def init_db():
             affected_record_no TEXT,
             adjustment_suggestion TEXT,
             review_alert INTEGER DEFAULT 0,
+            handling_status TEXT DEFAULT '待处理',
+            responsible_person TEXT,
+            completion_time TEXT,
+            review_conclusion TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(hall_no, planned_start)
         )
     """)
+    
+    try:
+        cursor.execute("ALTER TABLE schedule_records ADD COLUMN handling_status TEXT DEFAULT '待处理'")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute("ALTER TABLE schedule_records ADD COLUMN responsible_person TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute("ALTER TABLE schedule_records ADD COLUMN completion_time TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute("ALTER TABLE schedule_records ADD COLUMN review_conclusion TEXT")
+    except sqlite3.OperationalError:
+        pass
+    
     conn.commit()
     conn.close()
 
@@ -139,8 +161,9 @@ def create_record(data: Dict) -> Tuple[bool, str, Optional[Dict]]:
             INSERT INTO schedule_records (
                 record_no, movie_name, hall_no, planned_start, actual_start,
                 deviation_minutes, deviation_reason, affects_next, affected_record_no,
-                adjustment_suggestion, review_alert
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                adjustment_suggestion, review_alert, handling_status,
+                responsible_person, completion_time, review_conclusion
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             record_no,
             data["movie_name"],
@@ -152,7 +175,11 @@ def create_record(data: Dict) -> Tuple[bool, str, Optional[Dict]]:
             1 if data.get("affects_next") else 0,
             data.get("affected_record_no", ""),
             data.get("adjustment_suggestion", ""),
-            review_alert
+            review_alert,
+            data.get("handling_status", "待处理"),
+            data.get("responsible_person", ""),
+            data.get("completion_time", ""),
+            data.get("review_conclusion", ""),
         ))
         conn.commit()
         record_id = cursor.lastrowid
@@ -203,6 +230,10 @@ def update_record(record_id: int, data: Dict) -> Tuple[bool, str, Optional[Dict]
                 affected_record_no = ?,
                 adjustment_suggestion = ?,
                 review_alert = ?,
+                handling_status = ?,
+                responsible_person = ?,
+                completion_time = ?,
+                review_conclusion = ?,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
         """, (
@@ -216,6 +247,10 @@ def update_record(record_id: int, data: Dict) -> Tuple[bool, str, Optional[Dict]
             data.get("affected_record_no", ""),
             data.get("adjustment_suggestion", ""),
             review_alert,
+            data.get("handling_status", "待处理"),
+            data.get("responsible_person", ""),
+            data.get("completion_time", ""),
+            data.get("review_conclusion", ""),
             record_id
         ))
         conn.commit()
@@ -359,3 +394,189 @@ def get_review_alerts() -> List[Dict]:
     rows = cursor.fetchall()
     conn.close()
     return [dict(row) for row in rows]
+
+
+def get_records_with_filters(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    hall_no: Optional[str] = None,
+    movie_name: Optional[str] = None,
+    handling_status: Optional[str] = None
+) -> List[Dict]:
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    query = "SELECT * FROM schedule_records WHERE 1=1"
+    params = []
+    
+    if start_date:
+        query += " AND DATE(planned_start) >= ?"
+        params.append(start_date)
+    if end_date:
+        query += " AND DATE(planned_start) <= ?"
+        params.append(end_date)
+    if hall_no:
+        query += " AND hall_no = ?"
+        params.append(hall_no)
+    if movie_name:
+        query += " AND movie_name LIKE ?"
+        params.append(f"%{movie_name}%")
+    if handling_status:
+        query += " AND handling_status = ?"
+        params.append(handling_status)
+    
+    query += " ORDER BY planned_start DESC"
+    
+    cursor.execute(query, params)
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def update_handling_info(
+    record_id: int,
+    handling_status: str,
+    responsible_person: str,
+    completion_time: Optional[str],
+    review_conclusion: str
+) -> Tuple[bool, str]:
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE schedule_records SET
+                handling_status = ?,
+                responsible_person = ?,
+                completion_time = ?,
+                review_conclusion = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        """, (handling_status, responsible_person, completion_time, review_conclusion, record_id))
+        conn.commit()
+        conn.close()
+        return True, "更新成功"
+    except Exception as e:
+        conn.close()
+        return False, f"更新失败: {str(e)}"
+
+
+def get_hall_completion_rate() -> List[Dict]:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT hall_no,
+               COUNT(*) as total_count,
+               SUM(CASE WHEN handling_status = '已完成' THEN 1 ELSE 0 END) as completed_count,
+               ROUND(
+                   SUM(CASE WHEN handling_status = '已完成' THEN 1 ELSE 0 END) * 100.0 / 
+                   NULLIF(COUNT(*), 0), 2
+               ) as completion_rate
+        FROM schedule_records
+        GROUP BY hall_no
+        ORDER BY hall_no
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def get_reason_handling_time() -> List[Dict]:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT 
+            COALESCE(NULLIF(deviation_reason, ''), '未填写') as deviation_reason,
+            COUNT(*) as count,
+            ROUND(AVG(
+                CASE 
+                    WHEN completion_time IS NOT NULL AND completion_time != '' 
+                         AND actual_start IS NOT NULL AND actual_start != '' THEN
+                        CAST((julianday(completion_time) - julianday(actual_start)) * 24 * 60 AS INTEGER)
+                    ELSE NULL 
+                END
+            ), 2) as avg_handling_minutes
+        FROM schedule_records
+        WHERE handling_status = '已完成'
+        GROUP BY deviation_reason
+        ORDER BY count DESC
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def get_incomplete_records() -> List[Dict]:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT * FROM schedule_records
+        WHERE handling_status != '已完成' OR handling_status IS NULL
+        ORDER BY planned_start DESC
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def get_handling_trend() -> List[Dict]:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT 
+            DATE(COALESCE(completion_time, updated_at)) as date,
+            COUNT(*) as total_handled,
+            SUM(CASE WHEN handling_status = '已完成' THEN 1 ELSE 0 END) as completed_count,
+            SUM(CASE WHEN handling_status = '处理中' THEN 1 ELSE 0 END) as processing_count,
+            SUM(CASE WHEN handling_status = '待处理' THEN 1 ELSE 0 END) as pending_count
+        FROM schedule_records
+        GROUP BY DATE(COALESCE(completion_time, updated_at))
+        ORDER BY date DESC
+        LIMIT 30
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def get_handling_statistics() -> Dict:
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT COUNT(*) as total FROM schedule_records")
+    total = cursor.fetchone()["total"]
+    
+    cursor.execute("SELECT COUNT(*) as pending FROM schedule_records WHERE handling_status = '待处理' OR handling_status IS NULL")
+    pending = cursor.fetchone()["pending"]
+    
+    cursor.execute("SELECT COUNT(*) as processing FROM schedule_records WHERE handling_status = '处理中'")
+    processing = cursor.fetchone()["processing"]
+    
+    cursor.execute("SELECT COUNT(*) as completed FROM schedule_records WHERE handling_status = '已完成'")
+    completed = cursor.fetchone()["completed"]
+    
+    cursor.execute("""
+        SELECT ROUND(AVG(
+            CASE 
+                WHEN completion_time IS NOT NULL AND completion_time != '' 
+                     AND actual_start IS NOT NULL AND actual_start != '' THEN
+                    CAST((julianday(completion_time) - julianday(actual_start)) * 24 * 60 AS INTEGER)
+                ELSE NULL 
+            END
+        ), 2) as avg_handling_time
+        FROM schedule_records
+        WHERE handling_status = '已完成'
+    """)
+    avg_handling_time = cursor.fetchone()["avg_handling_time"]
+    
+    conn.close()
+    
+    completion_rate = round(completed * 100.0 / total, 2) if total > 0 else 0
+    
+    return {
+        "total": total,
+        "pending": pending,
+        "processing": processing,
+        "completed": completed,
+        "completion_rate": completion_rate,
+        "avg_handling_time": avg_handling_time or 0
+    }
