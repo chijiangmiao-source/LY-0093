@@ -1005,7 +1005,8 @@ def main(page: ft.Page):
             completion_field = ft.TextField(
                 label="处理完成时间 (YYYY-MM-DD HH:MM)",
                 width=300,
-                value=format_datetime(completion) if completion else ""
+                value=format_datetime(completion) if completion else "",
+                disabled=(status != "已完成")
             )
             conclusion_field = ft.TextField(
                 label="复盘结论",
@@ -1016,8 +1017,13 @@ def main(page: ft.Page):
             )
             
             def on_status_change(e):
-                if status_dropdown.value == "已完成" and not completion_field.value.strip():
-                    completion_field.value = datetime.now().strftime("%Y-%m-%d %H:%M")
+                if status_dropdown.value == "已完成":
+                    completion_field.disabled = False
+                    if not completion_field.value.strip():
+                        completion_field.value = datetime.now().strftime("%Y-%m-%d %H:%M")
+                else:
+                    completion_field.disabled = True
+                    completion_field.value = ""
                 page.update()
             
             status_dropdown.on_change = on_status_change
@@ -1028,14 +1034,22 @@ def main(page: ft.Page):
                 new_completion = completion_field.value.strip()
                 new_conclusion = conclusion_field.value.strip()
                 
-                try:
-                    if new_completion:
-                        completion_dt = datetime.strptime(new_completion, "%Y-%m-%d %H:%M").isoformat()
-                    else:
-                        completion_dt = None
-                except ValueError:
-                    show_snackbar("处理完成时间格式错误", ft.colors.RED)
+                if new_status == "已完成" and not new_conclusion:
+                    show_snackbar("状态为已完成时，复盘结论不能为空", ft.colors.RED)
                     return
+                
+                if new_status != "已完成":
+                    new_completion = ""
+                    completion_dt = None
+                else:
+                    try:
+                        if new_completion:
+                            completion_dt = datetime.strptime(new_completion, "%Y-%m-%d %H:%M").isoformat()
+                        else:
+                            completion_dt = datetime.now().isoformat()
+                    except ValueError:
+                        show_snackbar("处理完成时间格式错误", ft.colors.RED)
+                        return
                 
                 success, msg = update_handling_info(
                     record_id, new_status, new_person, completion_dt, new_conclusion

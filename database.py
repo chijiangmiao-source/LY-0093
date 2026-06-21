@@ -510,7 +510,8 @@ def get_incomplete_records() -> List[Dict]:
     cursor = conn.cursor()
     cursor.execute("""
         SELECT * FROM schedule_records
-        WHERE handling_status != '已完成' OR handling_status IS NULL
+        WHERE handling_status IN ('待处理', '处理中')
+           OR handling_status IS NULL
         ORDER BY planned_start DESC
     """)
     rows = cursor.fetchall()
