@@ -1,5 +1,6 @@
 import sqlite3
 import os
+import json
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple
 
@@ -57,6 +58,21 @@ def init_db():
         cursor.execute("ALTER TABLE schedule_records ADD COLUMN review_conclusion TEXT")
     except sqlite3.OperationalError:
         pass
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS monthly_archives (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            archive_month TEXT NOT NULL UNIQUE,
+            archive_no TEXT NOT NULL UNIQUE,
+            total_shows INTEGER DEFAULT 0,
+            serious_deviation_count INTEGER DEFAULT 0,
+            main_deviation_reason TEXT,
+            hall_completion_rates TEXT,
+            unclosed_count INTEGER DEFAULT 0,
+            deviation_reason_summary TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     
     conn.commit()
     conn.close()
@@ -401,7 +417,8 @@ def get_records_with_filters(
     end_date: Optional[str] = None,
     hall_no: Optional[str] = None,
     movie_name: Optional[str] = None,
-    handling_status: Optional[str] = None
+    handling_status: Optional[str] = None,
+    deviation_reason: Optional[str] = None
 ) -> List[Dict]:
     conn = get_connection()
     cursor = conn.cursor()
@@ -424,6 +441,9 @@ def get_records_with_filters(
     if handling_status:
         query += " AND handling_status = ?"
         params.append(handling_status)
+    if deviation_reason:
+        query += " AND deviation_reason LIKE ?"
+        params.append(f"%{deviation_reason}%")
     
     query += " ORDER BY planned_start DESC"
     
@@ -581,3 +601,193 @@ def get_handling_statistics() -> Dict:
         "completion_rate": completion_rate,
         "avg_handling_time": avg_handling_time or 0
     }
+
+
+def generate_archive_no() -> str:
+    now = datetime.now()
+    date_part = now.strftime("%Y%m")
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT COUNT(*) as cnt FROM monthly_archives WHERE archive_no LIKE ?",
+        (f"ARCH{date_part}%",)
+    )
+    count = cursor.fetchone()["cnt"] + 1
+    conn.close()
+    return f"ARCH{date_part}{count:03d}"
+
+
+def get_monthly_summary_data(archive_month: str) -> Dict:
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    start_date = f"{archive_month}-01"
+    if archive_month.endswith("-12"):
+        next_year = int(archive_month[:4]) + 1
+        end_date = f"{next_year}-01-01"
+    else:
+        year = int(archive_month[:4])
+        month = int(archive_month[5:7]) + 1
+        end_date = f"{year:04d}-{month:02d}-01"
+    
+    cursor.execute("""
+        SELECT 
+            COUNT(*) as total_shows,
+            SUM(CASE WHEN ABS(deviation_minutes) > 15 THEN 1 ELSE 0 END) as serious_deviation_count
+        FROM schedule_records
+        WHERE DATE(planned_start) >= ? AND DATE(planned_start) < ?
+    """, (start_date, end_date))
+    summary = dict(cursor.fetchone())
+    
+    cursor.execute("""
+        SELECT deviation_reason, COUNT(*) as cnt
+        FROM schedule_records
+        WHERE DATE(planned_start) >= ? AND DATE(planned_start) < ?
+          AND deviation_reason IS NOT NULL AND deviation_reason != ''
+        GROUP BY deviation_reason
+        ORDER BY cnt DESC
+    """, (start_date, end_date))
+    reason_rows = cursor.fetchall()
+    reason_summary = [dict(r) for r in reason_rows]
+    main_reason = reason_summary[0]["deviation_reason"] if reason_summary else "无"
+    
+    cursor.execute("""
+        SELECT hall_no,
+               COUNT(*) as total_count,
+               SUM(CASE WHEN handling_status = '已完成' THEN 1 ELSE 0 END) as completed_count,
+               ROUND(
+                   SUM(CASE WHEN handling_status = '已完成' THEN 1 ELSE 0 END) * 100.0 / 
+                   NULLIF(COUNT(*), 0), 2
+               ) as completion_rate
+        FROM schedule_records
+        WHERE DATE(planned_start) >= ? AND DATE(planned_start) < ?
+        GROUP BY hall_no
+        ORDER BY hall_no
+    """, (start_date, end_date))
+    hall_rows = cursor.fetchall()
+    hall_completion = [dict(r) for r in hall_rows]
+    
+    cursor.execute("""
+        SELECT COUNT(*) as unclosed_count
+        FROM schedule_records
+        WHERE DATE(planned_start) >= ? AND DATE(planned_start) < ?
+          AND (handling_status IN ('待处理', '处理中') OR handling_status IS NULL)
+    """, (start_date, end_date))
+    unclosed_count = cursor.fetchone()["unclosed_count"] or 0
+    
+    conn.close()
+    
+    return {
+        "archive_month": archive_month,
+        "total_shows": summary["total_shows"] or 0,
+        "serious_deviation_count": summary["serious_deviation_count"] or 0,
+        "main_deviation_reason": main_reason,
+        "hall_completion_rates": hall_completion,
+        "unclosed_count": unclosed_count,
+        "deviation_reason_summary": reason_summary
+    }
+
+
+def create_monthly_archive(archive_month: str) -> Tuple[bool, str, Optional[Dict]]:
+    summary = get_monthly_summary_data(archive_month)
+    
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM monthly_archives WHERE archive_month = ?", (archive_month,))
+        if cursor.fetchone():
+            conn.close()
+            return False, f"{archive_month} 已存在归档记录", None
+        
+        archive_no = generate_archive_no()
+        
+        cursor.execute("""
+            INSERT INTO monthly_archives (
+                archive_month, archive_no, total_shows, serious_deviation_count,
+                main_deviation_reason, hall_completion_rates, unclosed_count,
+                deviation_reason_summary
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            archive_month,
+            archive_no,
+            summary["total_shows"],
+            summary["serious_deviation_count"],
+            summary["main_deviation_reason"],
+            json.dumps(summary["hall_completion_rates"], ensure_ascii=False),
+            summary["unclosed_count"],
+            json.dumps(summary["deviation_reason_summary"], ensure_ascii=False)
+        ))
+        conn.commit()
+        archive_id = cursor.lastrowid
+        
+        cursor.execute("SELECT * FROM monthly_archives WHERE id = ?", (archive_id,))
+        row = cursor.fetchone()
+        conn.close()
+        
+        result = dict(row) if row else None
+        if result:
+            result["hall_completion_rates"] = json.loads(result["hall_completion_rates"]) if result["hall_completion_rates"] else []
+            result["deviation_reason_summary"] = json.loads(result["deviation_reason_summary"]) if result["deviation_reason_summary"] else []
+        return True, "归档创建成功", result
+    except Exception as e:
+        conn.close()
+        return False, f"归档创建失败: {str(e)}", None
+
+
+def get_all_archives() -> List[Dict]:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM monthly_archives ORDER BY archive_month DESC")
+    rows = cursor.fetchall()
+    conn.close()
+    
+    results = []
+    for row in rows:
+        r = dict(row)
+        r["hall_completion_rates"] = json.loads(r["hall_completion_rates"]) if r["hall_completion_rates"] else []
+        r["deviation_reason_summary"] = json.loads(r["deviation_reason_summary"]) if r["deviation_reason_summary"] else []
+        results.append(r)
+    return results
+
+
+def get_archive_by_id(archive_id: int) -> Optional[Dict]:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM monthly_archives WHERE id = ?", (archive_id,))
+    row = cursor.fetchone()
+    conn.close()
+    
+    if row:
+        r = dict(row)
+        r["hall_completion_rates"] = json.loads(r["hall_completion_rates"]) if r["hall_completion_rates"] else []
+        r["deviation_reason_summary"] = json.loads(r["deviation_reason_summary"]) if r["deviation_reason_summary"] else []
+        return r
+    return None
+
+
+def get_archive_by_month(archive_month: str) -> Optional[Dict]:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM monthly_archives WHERE archive_month = ?", (archive_month,))
+    row = cursor.fetchone()
+    conn.close()
+    
+    if row:
+        r = dict(row)
+        r["hall_completion_rates"] = json.loads(r["hall_completion_rates"]) if r["hall_completion_rates"] else []
+        r["deviation_reason_summary"] = json.loads(r["deviation_reason_summary"]) if r["deviation_reason_summary"] else []
+        return r
+    return None
+
+
+def delete_archive(archive_id: int) -> Tuple[bool, str]:
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM monthly_archives WHERE id = ?", (archive_id,))
+        conn.commit()
+        conn.close()
+        return True, "归档删除成功"
+    except Exception as e:
+        conn.close()
+        return False, f"归档删除失败: {str(e)}"

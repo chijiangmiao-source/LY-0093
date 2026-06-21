@@ -2,13 +2,16 @@ import flet as ft
 from datetime import datetime, timedelta
 import pandas as pd
 import plotly.express as px
+import os
 from database import (
     init_db, get_all_records, create_record, update_record, delete_record,
     get_record_by_id, get_records_by_hall, get_all_halls, get_reason_statistics,
     get_time_slot_statistics, get_daily_deviation_trend, get_review_alerts,
     calculate_deviation, get_records_with_filters, update_handling_info,
     get_hall_completion_rate, get_reason_handling_time, get_incomplete_records,
-    get_handling_trend, get_handling_statistics
+    get_handling_trend, get_handling_statistics, create_monthly_archive,
+    get_all_archives, get_archive_by_id, get_archive_by_month, delete_archive,
+    get_monthly_summary_data
 )
 
 
@@ -41,13 +44,19 @@ def main(page: ft.Page):
     editing_record_id = None
     selected_hall = None
     closure_editing_record_id = None
+    current_archive_tab = "list"
+    selected_archive_id = None
 
-    def switch_view(view, record_id=None, hall=None, closure_edit_id=None):
-        nonlocal current_view, editing_record_id, selected_hall, closure_editing_record_id
+    def switch_view(view, record_id=None, hall=None, closure_edit_id=None, archive_tab=None, archive_id=None):
+        nonlocal current_view, editing_record_id, selected_hall, closure_editing_record_id, current_archive_tab, selected_archive_id
         current_view = view
         editing_record_id = record_id
         selected_hall = hall
         closure_editing_record_id = closure_edit_id
+        if archive_tab:
+            current_archive_tab = archive_tab
+        if archive_id is not None:
+            selected_archive_id = archive_id
         render_page()
 
     def show_snackbar(message, color=ft.colors.BLUE):
@@ -99,6 +108,12 @@ def main(page: ft.Page):
                     icon=ft.icons.DASHBOARD,
                     tooltip="闭环统计",
                     on_click=lambda e: switch_view("closure_stats"),
+                    icon_color=ft.colors.WHITE
+                ),
+                ft.IconButton(
+                    icon=ft.icons.ARCHIVE,
+                    tooltip="数据导出与月度归档",
+                    on_click=lambda e: switch_view("export_archive"),
                     icon_color=ft.colors.WHITE
                 ),
             ]
@@ -1443,6 +1458,739 @@ def main(page: ft.Page):
         
         return content
 
+    def build_data_export_view():
+        halls = get_all_halls()
+        handling_statuses = ["全部", "待处理", "处理中", "已完成"]
+        
+        filter_start_date = ft.TextField(label="开始日期 (YYYY-MM-DD)", width=200)
+        filter_end_date = ft.TextField(label="结束日期 (YYYY-MM-DD)", width=200)
+        filter_hall = ft.Dropdown(
+            label="选择影厅",
+            width=160,
+            value="全部",
+            options=[ft.dropdown.Option("全部")] + [ft.dropdown.Option(h) for h in halls]
+        )
+        filter_movie = ft.TextField(label="影片名称", width=200)
+        filter_reason = ft.Dropdown(
+            label="偏差原因",
+            width=180,
+            value="全部",
+            options=[ft.dropdown.Option("全部")] + [ft.dropdown.Option(r) for r in DEVIATION_REASONS]
+        )
+        filter_status = ft.Dropdown(
+            label="处理状态",
+            width=140,
+            value="全部",
+            options=[ft.dropdown.Option(s) for s in handling_statuses]
+        )
+        
+        result_count_text = ft.Text("请设置筛选条件后点击查询", size=14, color=ft.colors.GREY_600)
+        records_view = ft.Column([])
+        last_filtered_records = []
+        
+        def get_status_color(status):
+            if status == "已完成":
+                return ft.colors.GREEN
+            elif status == "处理中":
+                return ft.colors.ORANGE
+            else:
+                return ft.colors.RED
+        
+        def load_filtered_records(e=None):
+            nonlocal last_filtered_records
+            start_date = filter_start_date.value.strip() if filter_start_date.value.strip() else None
+            end_date = filter_end_date.value.strip() if filter_end_date.value.strip() else None
+            hall = filter_hall.value if filter_hall.value and filter_hall.value != "全部" else None
+            movie = filter_movie.value.strip() if filter_movie.value.strip() else None
+            reason = filter_reason.value if filter_reason.value and filter_reason.value != "全部" else None
+            status = filter_status.value if filter_status.value and filter_status.value != "全部" else None
+            
+            records = get_records_with_filters(start_date, end_date, hall, movie, status, reason)
+            last_filtered_records = records
+            
+            result_count_text.value = f"查询结果：共 {len(records)} 条记录"
+            page.update()
+            
+            if not records:
+                records_view.controls = [ft.Text("暂无符合条件的记录", size=16, color=ft.colors.GREY_700)]
+                page.update()
+                return
+            
+            columns = [
+                ft.DataColumn(ft.Text("记录编号", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("影片名称", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("影厅", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("计划开场", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("实际开场", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("偏差(分钟)", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("偏差原因", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("影响下一场", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("处理状态", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("责任人", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("处理完成时间", weight=ft.FontWeight.BOLD)),
+            ]
+            
+            rows = []
+            for rec in records:
+                deviation_color = ft.colors.RED if abs(rec["deviation_minutes"]) > 15 else (
+                    ft.colors.ORANGE if rec["deviation_minutes"] != 0 else ft.colors.GREEN
+                )
+                status = rec.get("handling_status") or "待处理"
+                status_color = get_status_color(status)
+                
+                rows.append(
+                    ft.DataRow(
+                        cells=[
+                            ft.DataCell(ft.Text(rec["record_no"])),
+                            ft.DataCell(ft.Text(rec["movie_name"])),
+                            ft.DataCell(ft.Text(rec["hall_no"])),
+                            ft.DataCell(ft.Text(format_datetime(rec["planned_start"]))),
+                            ft.DataCell(ft.Text(format_datetime(rec["actual_start"]))),
+                            ft.DataCell(ft.Text(str(rec["deviation_minutes"]), color=deviation_color, weight=ft.FontWeight.BOLD)),
+                            ft.DataCell(ft.Text(rec["deviation_reason"] or "-")),
+                            ft.DataCell(ft.Text("是" if rec["affects_next"] else "否")),
+                            ft.DataCell(
+                                ft.Container(
+                                    content=ft.Text(status, color=ft.colors.WHITE, size=12, weight=ft.FontWeight.BOLD),
+                                    padding=ft.padding.symmetric(horizontal=8, vertical=4),
+                                    bgcolor=status_color,
+                                    border_radius=4,
+                                )
+                            ),
+                            ft.DataCell(ft.Text(rec.get("responsible_person") or "-")),
+                            ft.DataCell(ft.Text(format_datetime(rec.get("completion_time")) or "-")),
+                        ]
+                    )
+                )
+            
+            records_view.controls = [
+                ft.Container(
+                    content=ft.DataTable(
+                        columns=columns,
+                        rows=rows,
+                        horizontal_lines=ft.BorderSide(1, ft.colors.GREY_300),
+                        heading_row_color=ft.colors.BLUE_50,
+                        show_bottom_border=True,
+                    ),
+                    expand=True
+                )
+            ]
+            page.update()
+        
+        def export_to_excel(e):
+            nonlocal last_filtered_records
+            if not last_filtered_records:
+                show_snackbar("请先查询数据后再导出", ft.colors.ORANGE)
+                return
+            
+            try:
+                export_data = []
+                for rec in last_filtered_records:
+                    export_data.append({
+                        "记录编号": rec["record_no"],
+                        "影片名称": rec["movie_name"],
+                        "影厅": rec["hall_no"],
+                        "计划开场时间": format_datetime(rec["planned_start"]),
+                        "实际开场时间": format_datetime(rec["actual_start"]),
+                        "偏差(分钟)": rec["deviation_minutes"],
+                        "偏差原因": rec["deviation_reason"] or "",
+                        "是否影响下一场": "是" if rec["affects_next"] else "否",
+                        "受影响场次编号": rec.get("affected_record_no", "") or "",
+                        "调整建议": rec.get("adjustment_suggestion", "") or "",
+                        "复查提醒": "是" if rec.get("review_alert") else "否",
+                        "处理状态": rec.get("handling_status", "待处理") or "待处理",
+                        "责任人": rec.get("responsible_person", "") or "",
+                        "处理完成时间": format_datetime(rec.get("completion_time")) or "",
+                        "复盘结论": rec.get("review_conclusion", "") or "",
+                    })
+                
+                df = pd.DataFrame(export_data)
+                
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"排片偏差记录_{timestamp}.xlsx"
+                export_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
+                
+                with pd.ExcelWriter(export_path, engine="openpyxl") as writer:
+                    df.to_excel(writer, index=False, sheet_name="排片偏差记录")
+                    
+                    worksheet = writer.sheets["排片偏差记录"]
+                    for idx, col in enumerate(df.columns):
+                        max_len = max(
+                            df[col].astype(str).map(len).max(),
+                            len(col)
+                        ) + 2
+                        worksheet.column_dimensions[chr(65 + idx) if idx < 26 else "A" + chr(65 + idx - 26)].width = min(max_len, 30)
+                
+                show_snackbar(f"导出成功！文件已保存至：{export_path}", ft.colors.GREEN)
+            except Exception as ex:
+                show_snackbar(f"导出失败：{str(ex)}", ft.colors.RED)
+        
+        def reset_filters(e):
+            filter_start_date.value = ""
+            filter_end_date.value = ""
+            filter_hall.value = "全部"
+            filter_movie.value = ""
+            filter_reason.value = "全部"
+            filter_status.value = "全部"
+            result_count_text.value = "请设置筛选条件后点击查询"
+            last_filtered_records = []
+            records_view.controls = []
+            page.update()
+        
+        search_btn = ft.ElevatedButton(
+            "查询",
+            icon=ft.icons.SEARCH,
+            bgcolor=ft.colors.BLUE_700,
+            color=ft.colors.WHITE,
+            on_click=load_filtered_records
+        )
+        reset_btn = ft.OutlinedButton(
+            "重置",
+            icon=ft.icons.REFRESH,
+            on_click=reset_filters
+        )
+        export_btn = ft.ElevatedButton(
+            "导出 Excel",
+            icon=ft.icons.DOWNLOAD,
+            bgcolor=ft.colors.GREEN_700,
+            color=ft.colors.WHITE,
+            on_click=export_to_excel
+        )
+        
+        content = ft.Column([
+            ft.Row([
+                filter_start_date,
+                filter_end_date,
+                filter_hall,
+                filter_movie,
+            ], spacing=15, wrap=True),
+            ft.Row([
+                filter_reason,
+                filter_status,
+            ], spacing=15, wrap=True),
+            ft.Row([search_btn, reset_btn, export_btn, ft.Container(expand=True), result_count_text], spacing=15),
+            ft.Divider(),
+            records_view,
+        ], expand=True, spacing=15, scroll=ft.ScrollMode.AUTO)
+        
+        return content
+
+    def build_monthly_archive_view():
+        nonlocal current_archive_tab, selected_archive_id
+        
+        def switch_archive_tab(tab_id):
+            nonlocal current_archive_tab, selected_archive_id
+            current_archive_tab = tab_id
+            if tab_id != "detail":
+                selected_archive_id = None
+            render_page()
+        
+        def build_archive_list_tab():
+            archives = get_all_archives()
+            
+            now = datetime.now()
+            default_month = now.strftime("%Y-%m")
+            archive_month_field = ft.TextField(
+                label="归档月份 (YYYY-MM)",
+                width=200,
+                value=default_month
+            )
+            
+            columns = [
+                ft.DataColumn(ft.Text("操作", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("归档编号", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("归档月份", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("总场次", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("严重偏差次数", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("主要偏差原因", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("未闭环记录数", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("创建时间", weight=ft.FontWeight.BOLD)),
+            ]
+            
+            rows = []
+            for arch in archives:
+                rows.append(
+                    ft.DataRow(
+                        cells=[
+                            ft.DataCell(
+                                ft.Row([
+                                    ft.IconButton(
+                                        ft.icons.VISIBILITY,
+                                        icon_size=20,
+                                        tooltip="查看详情",
+                                        on_click=lambda e, aid=arch["id"]: (
+                                            setattr(selected_archive_id, "value", aid) if False else None,
+                                            switch_view("export_archive", archive_tab="detail", archive_id=arch["id"])
+                                        )
+                                    ),
+                                    ft.IconButton(
+                                        ft.icons.DELETE,
+                                        icon_size=20,
+                                        tooltip="删除归档",
+                                        icon_color=ft.colors.RED,
+                                        on_click=lambda e, aid=arch["id"]: handle_delete_archive(aid)
+                                    ),
+                                ])
+                            ),
+                            ft.DataCell(ft.Text(arch["archive_no"])),
+                            ft.DataCell(ft.Text(arch["archive_month"])),
+                            ft.DataCell(ft.Text(str(arch["total_shows"]))),
+                            ft.DataCell(
+                                ft.Text(str(arch["serious_deviation_count"]), 
+                                       color=ft.colors.RED if arch["serious_deviation_count"] > 0 else ft.colors.GREEN,
+                                       weight=ft.FontWeight.BOLD)
+                            ),
+                            ft.DataCell(ft.Text(arch["main_deviation_reason"] or "-")),
+                            ft.DataCell(
+                                ft.Text(str(arch["unclosed_count"]),
+                                       color=ft.colors.ORANGE if arch["unclosed_count"] > 0 else ft.colors.GREEN,
+                                       weight=ft.FontWeight.BOLD)
+                            ),
+                            ft.DataCell(ft.Text(format_datetime(arch["created_at"]))),
+                        ]
+                    )
+                )
+            
+            def handle_create_archive(e):
+                month_val = archive_month_field.value.strip()
+                if not month_val:
+                    show_snackbar("请输入归档月份", ft.colors.RED)
+                    return
+                try:
+                    datetime.strptime(month_val, "%Y-%m")
+                except ValueError:
+                    show_snackbar("月份格式错误，请使用 YYYY-MM 格式", ft.colors.RED)
+                    return
+                
+                def confirm_create(ev):
+                    success, msg, _ = create_monthly_archive(month_val)
+                    show_snackbar(msg, ft.colors.GREEN if success else ft.colors.RED)
+                    dialog.open = False
+                    page.update()
+                    if success:
+                        switch_view("export_archive", archive_tab="list")
+                
+                dialog = ft.AlertDialog(
+                    title=ft.Text("确认创建归档"),
+                    content=ft.Text(f"确定要创建 {month_val} 月份的归档吗？归档将汇总当月所有数据。"),
+                    actions=[
+                        ft.TextButton("取消", on_click=lambda e: setattr(dialog, 'open', False) or page.update()),
+                        ft.TextButton("确定创建", on_click=confirm_create, style=ft.ButtonStyle(color=ft.colors.BLUE_700)),
+                    ],
+                    actions_alignment=ft.MainAxisAlignment.END
+                )
+                page.dialog = dialog
+                dialog.open = True
+                page.update()
+            
+            def handle_delete_archive(archive_id):
+                def confirm_delete(ev):
+                    success, msg = delete_archive(archive_id)
+                    show_snackbar(msg, ft.colors.GREEN if success else ft.colors.RED)
+                    dialog.open = False
+                    page.update()
+                    if success:
+                        switch_view("export_archive", archive_tab="list")
+                
+                dialog = ft.AlertDialog(
+                    title=ft.Text("确认删除归档"),
+                    content=ft.Text("确定要删除此归档吗？此操作不可撤销。"),
+                    actions=[
+                        ft.TextButton("取消", on_click=lambda e: setattr(dialog, 'open', False) or page.update()),
+                        ft.TextButton("删除", on_click=confirm_delete, style=ft.ButtonStyle(color=ft.colors.RED)),
+                    ],
+                    actions_alignment=ft.MainAxisAlignment.END
+                )
+                page.dialog = dialog
+                dialog.open = True
+                page.update()
+            
+            preview_summary = ft.Container(visible=False)
+            
+            def show_preview(e):
+                month_val = archive_month_field.value.strip()
+                if not month_val:
+                    show_snackbar("请输入归档月份", ft.colors.RED)
+                    return
+                try:
+                    datetime.strptime(month_val, "%Y-%m")
+                except ValueError:
+                    show_snackbar("月份格式错误，请使用 YYYY-MM 格式", ft.colors.RED)
+                    return
+                
+                summary = get_monthly_summary_data(month_val)
+                existing_archive = get_archive_by_month(month_val)
+                status_text = "（已归档）" if existing_archive else "（未归档）"
+                status_color = ft.colors.GREEN if existing_archive else ft.colors.ORANGE
+                
+                preview_summary.visible = True
+                preview_summary.content = ft.Column([
+                    ft.Row([
+                        ft.Text(f"{month_val} 月数据预览 {status_text}", size=16, weight=ft.FontWeight.BOLD, color=status_color),
+                    ]),
+                    ft.Row([
+                        ft.Container(
+                            content=ft.Column([
+                                ft.Text("总场次", size=12, color=ft.colors.GREY_600),
+                                ft.Text(str(summary["total_shows"]), size=24, weight=ft.FontWeight.BOLD, color=ft.colors.BLUE_700),
+                            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                            padding=15,
+                            bgcolor=ft.colors.BLUE_50,
+                            border_radius=8,
+                            width=130,
+                        ),
+                        ft.Container(
+                            content=ft.Column([
+                                ft.Text("严重偏差", size=12, color=ft.colors.GREY_600),
+                                ft.Text(str(summary["serious_deviation_count"]), size=24, weight=ft.FontWeight.BOLD, color=ft.colors.RED),
+                            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                            padding=15,
+                            bgcolor=ft.colors.RED_50,
+                            border_radius=8,
+                            width=130,
+                        ),
+                        ft.Container(
+                            content=ft.Column([
+                                ft.Text("主要原因", size=12, color=ft.colors.GREY_600),
+                                ft.Text(summary["main_deviation_reason"] or "-", size=14, weight=ft.FontWeight.BOLD, color=ft.colors.ORANGE),
+                            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                            padding=15,
+                            bgcolor=ft.colors.ORANGE_50,
+                            border_radius=8,
+                            width=180,
+                        ),
+                        ft.Container(
+                            content=ft.Column([
+                                ft.Text("未闭环数", size=12, color=ft.colors.GREY_600),
+                                ft.Text(str(summary["unclosed_count"]), size=24, weight=ft.FontWeight.BOLD, color=ft.colors.PURPLE),
+                            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                            padding=15,
+                            bgcolor=ft.colors.PURPLE_50,
+                            border_radius=8,
+                            width=130,
+                        ),
+                    ], spacing=15),
+                ], spacing=10)
+                page.update()
+            
+            content = ft.Column([
+                ft.Container(
+                    content=ft.Column([
+                        ft.Row([
+                            ft.Text("创建月度归档", size=16, weight=ft.FontWeight.BOLD),
+                        ]),
+                        ft.Row([
+                            archive_month_field,
+                            ft.ElevatedButton("预览数据", icon=ft.icons.PREVIEW, on_click=show_preview),
+                            ft.ElevatedButton(
+                                "创建归档",
+                                icon=ft.icons.ADD,
+                                bgcolor=ft.colors.BLUE_700,
+                                color=ft.colors.WHITE,
+                                on_click=handle_create_archive
+                            ),
+                        ], spacing=15),
+                        preview_summary,
+                    ], spacing=10),
+                    padding=20,
+                    bgcolor=ft.colors.GREY_50,
+                    border_radius=10,
+                ),
+                ft.Divider(),
+                ft.Row([
+                    ft.Text(f"历史归档列表（共 {len(archives)} 条）", size=18, weight=ft.FontWeight.BOLD),
+                ]),
+                ft.Container(
+                    content=ft.DataTable(
+                        columns=columns,
+                        rows=rows,
+                        horizontal_lines=ft.BorderSide(1, ft.colors.GREY_300),
+                        heading_row_color=ft.colors.BLUE_50,
+                        show_bottom_border=True,
+                    ) if rows else ft.Text("暂无归档记录", size=16, color=ft.colors.GREY_700),
+                    expand=True
+                )
+            ], expand=True, spacing=15, scroll=ft.ScrollMode.AUTO)
+            
+            return content
+
+        def build_archive_detail_tab():
+            nonlocal selected_archive_id
+            if not selected_archive_id:
+                return ft.Column([
+                    ft.Text("请从归档列表选择要查看的归档记录", size=16, color=ft.colors.GREY_700),
+                    ft.ElevatedButton(
+                        "返回归档列表",
+                        icon=ft.icons.ARROW_BACK,
+                        on_click=lambda e: switch_view("export_archive", archive_tab="list")
+                    )
+                ], spacing=20)
+            
+            archive = get_archive_by_id(selected_archive_id)
+            if not archive:
+                return ft.Column([
+                    ft.Text("归档记录不存在或已被删除", size=16, color=ft.colors.RED),
+                    ft.ElevatedButton(
+                        "返回归档列表",
+                        icon=ft.icons.ARROW_BACK,
+                        on_click=lambda e: switch_view("export_archive", archive_tab="list")
+                    )
+                ], spacing=20)
+            
+            summary_cards = ft.Row([
+                ft.Container(
+                    content=ft.Column([
+                        ft.Text("总场次", size=12, color=ft.colors.GREY_600),
+                        ft.Text(str(archive["total_shows"]), size=28, weight=ft.FontWeight.BOLD, color=ft.colors.BLUE_700),
+                    ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                    padding=20,
+                    bgcolor=ft.colors.BLUE_50,
+                    border_radius=10,
+                    width=150,
+                ),
+                ft.Container(
+                    content=ft.Column([
+                        ft.Text("严重偏差", size=12, color=ft.colors.GREY_600),
+                        ft.Text(str(archive["serious_deviation_count"]), size=28, weight=ft.FontWeight.BOLD, color=ft.colors.RED),
+                    ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                    padding=20,
+                    bgcolor=ft.colors.RED_50,
+                    border_radius=10,
+                    width=150,
+                ),
+                ft.Container(
+                    content=ft.Column([
+                        ft.Text("严重偏差率", size=12, color=ft.colors.GREY_600),
+                        ft.Text(
+                            f"{archive['serious_deviation_count']/archive['total_shows']*100:.1f}%" if archive["total_shows"] > 0 else "-",
+                            size=28, weight=ft.FontWeight.BOLD, color=ft.colors.ORANGE
+                        ),
+                    ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                    padding=20,
+                    bgcolor=ft.colors.ORANGE_50,
+                    border_radius=10,
+                    width=160,
+                ),
+                ft.Container(
+                    content=ft.Column([
+                        ft.Text("未闭环数", size=12, color=ft.colors.GREY_600),
+                        ft.Text(str(archive["unclosed_count"]), size=28, weight=ft.FontWeight.BOLD, color=ft.colors.PURPLE),
+                    ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                    padding=20,
+                    bgcolor=ft.colors.PURPLE_50,
+                    border_radius=10,
+                    width=150,
+                ),
+            ], spacing=15, scroll=ft.ScrollMode.AUTO)
+            
+            info_cards = ft.Row([
+                ft.Container(
+                    content=ft.Column([
+                        ft.Text("归档编号", size=12, color=ft.colors.GREY_600),
+                        ft.Text(archive["archive_no"], size=16, weight=ft.FontWeight.BOLD),
+                    ]),
+                    padding=15,
+                    bgcolor=ft.colors.WHITE,
+                    border_radius=8,
+                    border=ft.border.all(1, ft.colors.GREY_300),
+                    expand=True,
+                ),
+                ft.Container(
+                    content=ft.Column([
+                        ft.Text("归档月份", size=12, color=ft.colors.GREY_600),
+                        ft.Text(archive["archive_month"], size=16, weight=ft.FontWeight.BOLD),
+                    ]),
+                    padding=15,
+                    bgcolor=ft.colors.WHITE,
+                    border_radius=8,
+                    border=ft.border.all(1, ft.colors.GREY_300),
+                    expand=True,
+                ),
+                ft.Container(
+                    content=ft.Column([
+                        ft.Text("主要偏差原因", size=12, color=ft.colors.GREY_600),
+                        ft.Text(archive["main_deviation_reason"] or "-", size=16, weight=ft.FontWeight.BOLD),
+                    ]),
+                    padding=15,
+                    bgcolor=ft.colors.WHITE,
+                    border_radius=8,
+                    border=ft.border.all(1, ft.colors.GREY_300),
+                    expand=True,
+                ),
+                ft.Container(
+                    content=ft.Column([
+                        ft.Text("创建时间", size=12, color=ft.colors.GREY_600),
+                        ft.Text(format_datetime(archive["created_at"]), size=16, weight=ft.FontWeight.BOLD),
+                    ]),
+                    padding=15,
+                    bgcolor=ft.colors.WHITE,
+                    border_radius=8,
+                    border=ft.border.all(1, ft.colors.GREY_300),
+                    expand=True,
+                ),
+            ], spacing=15)
+            
+            hall_columns = [
+                ft.DataColumn(ft.Text("影厅", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("总场次", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("已完成数", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("完成率(%)", weight=ft.FontWeight.BOLD)),
+            ]
+            hall_rows = []
+            hall_rates = archive.get("hall_completion_rates") or []
+            for hr in hall_rates:
+                rate = hr["completion_rate"] or 0
+                rate_color = ft.colors.GREEN if rate >= 80 else (ft.colors.ORANGE if rate >= 50 else ft.colors.RED)
+                hall_rows.append(
+                    ft.DataRow(
+                        cells=[
+                            ft.DataCell(ft.Text(hr["hall_no"])),
+                            ft.DataCell(ft.Text(str(hr["total_count"]))),
+                            ft.DataCell(ft.Text(str(hr["completed_count"]))),
+                            ft.DataCell(ft.Text(f"{rate:.1f}%", color=rate_color, weight=ft.FontWeight.BOLD)),
+                        ]
+                    )
+                )
+            hall_table = ft.Container(
+                content=ft.Column([
+                    ft.Text("各影厅完成率", size=16, weight=ft.FontWeight.BOLD),
+                    ft.Container(
+                        content=ft.DataTable(
+                            columns=hall_columns,
+                            rows=hall_rows,
+                            heading_row_color=ft.colors.BLUE_50,
+                            show_bottom_border=True,
+                        ) if hall_rows else ft.Text("暂无影厅数据", size=14, color=ft.colors.GREY_600),
+                        expand=True,
+                    )
+                ], spacing=10),
+                padding=15,
+                bgcolor=ft.colors.WHITE,
+                border_radius=10,
+                border=ft.border.all(1, ft.colors.GREY_300),
+                expand=True,
+            )
+            
+            reason_columns = [
+                ft.DataColumn(ft.Text("偏差原因", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("出现次数", weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("占比(%)", weight=ft.FontWeight.BOLD)),
+            ]
+            reason_rows = []
+            reason_summary = archive.get("deviation_reason_summary") or []
+            total_reason_count = sum(r["cnt"] for r in reason_summary)
+            for rs in reason_summary:
+                pct = (rs["cnt"] / total_reason_count * 100) if total_reason_count > 0 else 0
+                reason_rows.append(
+                    ft.DataRow(
+                        cells=[
+                            ft.DataCell(ft.Text(rs["deviation_reason"])),
+                            ft.DataCell(ft.Text(str(rs["cnt"]), weight=ft.FontWeight.BOLD)),
+                            ft.DataCell(ft.Text(f"{pct:.1f}%", color=ft.colors.BLUE_700, weight=ft.FontWeight.BOLD)),
+                        ]
+                    )
+                )
+            reason_table = ft.Container(
+                content=ft.Column([
+                    ft.Text("偏差原因分布", size=16, weight=ft.FontWeight.BOLD),
+                    ft.Container(
+                        content=ft.DataTable(
+                            columns=reason_columns,
+                            rows=reason_rows,
+                            heading_row_color=ft.colors.ORANGE_50,
+                            show_bottom_border=True,
+                        ) if reason_rows else ft.Text("暂无偏差原因数据", size=14, color=ft.colors.GREY_600),
+                        expand=True,
+                    )
+                ], spacing=10),
+                padding=15,
+                bgcolor=ft.colors.WHITE,
+                border_radius=10,
+                border=ft.border.all(1, ft.colors.GREY_300),
+                expand=True,
+            )
+            
+            content = ft.Column([
+                ft.Row([
+                    ft.Text(f"归档详情 - {archive['archive_month']}", size=22, weight=ft.FontWeight.BOLD),
+                    ft.Container(expand=True),
+                    ft.ElevatedButton(
+                        "返回归档列表",
+                        icon=ft.icons.ARROW_BACK,
+                        on_click=lambda e: switch_view("export_archive", archive_tab="list")
+                    ),
+                ], alignment=ft.MainAxisAlignment.START),
+                ft.Divider(),
+                info_cards,
+                ft.Divider(),
+                ft.Text("数据概览", size=18, weight=ft.FontWeight.BOLD),
+                summary_cards,
+                ft.Divider(),
+                ft.Row([hall_table, reason_table], spacing=20, scroll=ft.ScrollMode.AUTO),
+            ], expand=True, spacing=15, scroll=ft.ScrollMode.AUTO)
+            
+            return content
+
+        def build_export_tab():
+            return build_data_export_view()
+
+        tabs = ft.Tabs(
+            selected_index=0 if current_archive_tab == "list" else (1 if current_archive_tab == "export" else 2),
+            on_change=lambda e: switch_archive_tab(
+                "list" if e.control.selected_index == 0 
+                else ("export" if e.control.selected_index == 1 else "detail")
+            ),
+            tabs=[
+                ft.Tab(
+                    text="月度归档",
+                    icon=ft.icons.FOLDER,
+                    content=build_archive_list_tab()
+                ),
+                ft.Tab(
+                    text="数据导出",
+                    icon=ft.icons.DOWNLOAD,
+                    content=build_export_tab()
+                ),
+                ft.Tab(
+                    text="归档详情",
+                    icon=ft.icons.INFO,
+                    content=build_archive_detail_tab()
+                ),
+            ],
+            expand=True
+        )
+
+        def handle_tab_change(e):
+            idx = e.control.selected_index
+            if idx == 0:
+                switch_archive_tab("list")
+            elif idx == 1:
+                switch_archive_tab("export")
+            else:
+                switch_archive_tab("detail")
+
+        tabs.on_change = handle_tab_change
+
+        if current_archive_tab == "list":
+            tabs.selected_index = 0
+        elif current_archive_tab == "export":
+            tabs.selected_index = 1
+        else:
+            tabs.selected_index = 2
+
+        content = ft.Column([
+            ft.Row([
+                ft.Icon(ft.icons.ARCHIVE, color=ft.colors.TEAL_700, size=30),
+                ft.Text("数据导出与月度归档", size=24, weight=ft.FontWeight.BOLD),
+                ft.Container(expand=True),
+                ft.OutlinedButton("返回列表", icon=ft.icons.ARROW_BACK, on_click=lambda e: switch_view("list")),
+            ], alignment=ft.MainAxisAlignment.START),
+            ft.Divider(),
+            tabs,
+        ], expand=True, spacing=15)
+        
+        return content
+
     def render_page():
         page.clean()
         page.appbar = build_app_bar()
@@ -1461,6 +2209,8 @@ def main(page: ft.Page):
             page.add(build_closure_management_view())
         elif current_view == "closure_stats":
             page.add(build_closure_stats_view())
+        elif current_view == "export_archive":
+            page.add(build_monthly_archive_view())
 
         page.update()
 
