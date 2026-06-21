@@ -11,7 +11,7 @@ from database import (
     get_hall_completion_rate, get_reason_handling_time, get_incomplete_records,
     get_handling_trend, get_handling_statistics, create_monthly_archive,
     get_all_archives, get_archive_by_id, get_archive_by_month, delete_archive,
-    get_monthly_summary_data
+    get_monthly_summary_data, get_records_by_month
 )
 
 
@@ -1500,6 +1500,20 @@ def main(page: ft.Page):
             nonlocal last_filtered_records
             start_date = filter_start_date.value.strip() if filter_start_date.value.strip() else None
             end_date = filter_end_date.value.strip() if filter_end_date.value.strip() else None
+            
+            if start_date:
+                try:
+                    datetime.strptime(start_date, "%Y-%m-%d")
+                except ValueError:
+                    show_snackbar("日期格式不对，开始日期请使用 YYYY-MM-DD 格式", ft.colors.RED)
+                    return
+            if end_date:
+                try:
+                    datetime.strptime(end_date, "%Y-%m-%d")
+                except ValueError:
+                    show_snackbar("日期格式不对，结束日期请使用 YYYY-MM-DD 格式", ft.colors.RED)
+                    return
+            
             hall = filter_hall.value if filter_hall.value and filter_hall.value != "全部" else None
             movie = filter_movie.value.strip() if filter_movie.value.strip() else None
             reason = filter_reason.value if filter_reason.value and filter_reason.value != "全部" else None
@@ -2110,6 +2124,76 @@ def main(page: ft.Page):
                 expand=True,
             )
             
+            month_records = get_records_by_month(archive["archive_month"])
+            
+            def get_status_color(status):
+                if status == "已完成":
+                    return ft.colors.GREEN
+                elif status == "处理中":
+                    return ft.colors.ORANGE
+                else:
+                    return ft.colors.RED
+            
+            record_list_section = ft.Container()
+            if month_records:
+                rec_columns = [
+                    ft.DataColumn(ft.Text("记录编号", weight=ft.FontWeight.BOLD)),
+                    ft.DataColumn(ft.Text("影片名称", weight=ft.FontWeight.BOLD)),
+                    ft.DataColumn(ft.Text("影厅", weight=ft.FontWeight.BOLD)),
+                    ft.DataColumn(ft.Text("计划开场", weight=ft.FontWeight.BOLD)),
+                    ft.DataColumn(ft.Text("实际开场", weight=ft.FontWeight.BOLD)),
+                    ft.DataColumn(ft.Text("偏差(分钟)", weight=ft.FontWeight.BOLD)),
+                    ft.DataColumn(ft.Text("偏差原因", weight=ft.FontWeight.BOLD)),
+                    ft.DataColumn(ft.Text("处理状态", weight=ft.FontWeight.BOLD)),
+                ]
+                rec_rows = []
+                for rec in month_records:
+                    deviation_color = ft.colors.RED if abs(rec["deviation_minutes"]) > 15 else (
+                        ft.colors.ORANGE if rec["deviation_minutes"] != 0 else ft.colors.GREEN
+                    )
+                    status = rec.get("handling_status") or "待处理"
+                    status_color = get_status_color(status)
+                    rec_rows.append(
+                        ft.DataRow(
+                            cells=[
+                                ft.DataCell(ft.Text(rec["record_no"])),
+                                ft.DataCell(ft.Text(rec["movie_name"])),
+                                ft.DataCell(ft.Text(rec["hall_no"])),
+                                ft.DataCell(ft.Text(format_datetime(rec["planned_start"]))),
+                                ft.DataCell(ft.Text(format_datetime(rec["actual_start"]))),
+                                ft.DataCell(ft.Text(str(rec["deviation_minutes"]), color=deviation_color, weight=ft.FontWeight.BOLD)),
+                                ft.DataCell(ft.Text(rec["deviation_reason"] or "-")),
+                                ft.DataCell(
+                                    ft.Container(
+                                        content=ft.Text(status, color=ft.colors.WHITE, size=12, weight=ft.FontWeight.BOLD),
+                                        padding=ft.padding.symmetric(horizontal=8, vertical=4),
+                                        bgcolor=status_color,
+                                        border_radius=4,
+                                    )
+                                ),
+                            ]
+                        )
+                    )
+                record_list_section = ft.Container(
+                    content=ft.Column([
+                        ft.Text(f"当月记录明细（共 {len(month_records)} 条）", size=16, weight=ft.FontWeight.BOLD),
+                        ft.Container(
+                            content=ft.DataTable(
+                                columns=rec_columns,
+                                rows=rec_rows,
+                                horizontal_lines=ft.BorderSide(1, ft.colors.GREY_300),
+                                heading_row_color=ft.colors.TEAL_50,
+                                show_bottom_border=True,
+                            ),
+                            expand=True
+                        )
+                    ], spacing=10),
+                    padding=15,
+                    bgcolor=ft.colors.WHITE,
+                    border_radius=10,
+                    border=ft.border.all(1, ft.colors.GREY_300),
+                )
+            
             content = ft.Column([
                 ft.Row([
                     ft.Text(f"归档详情 - {archive['archive_month']}", size=22, weight=ft.FontWeight.BOLD),
@@ -2127,6 +2211,8 @@ def main(page: ft.Page):
                 summary_cards,
                 ft.Divider(),
                 ft.Row([hall_table, reason_table], spacing=20, scroll=ft.ScrollMode.AUTO),
+                ft.Divider(),
+                record_list_section,
             ], expand=True, spacing=15, scroll=ft.ScrollMode.AUTO)
             
             return content

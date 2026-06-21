@@ -205,6 +205,9 @@ def create_record(data: Dict) -> Tuple[bool, str, Optional[Dict]]:
         cursor.execute("SELECT * FROM schedule_records WHERE id = ?", (record_id,))
         row = cursor.fetchone()
         conn.close()
+        
+        refresh_all_affected_archives(data["planned_start"])
+        
         return True, "创建成功", dict(row) if row else None
     except sqlite3.IntegrityError as e:
         conn.close()
@@ -224,6 +227,10 @@ def update_record(record_id: int, data: Dict) -> Tuple[bool, str, Optional[Dict]
     conn = get_connection()
     try:
         cursor = conn.cursor()
+        cursor.execute("SELECT planned_start FROM schedule_records WHERE id = ?", (record_id,))
+        old_row = cursor.fetchone()
+        old_planned_start = old_row["planned_start"] if old_row else None
+
         cursor.execute("""
             SELECT id FROM schedule_records
             WHERE hall_no = ? AND planned_start = ? AND id != ?
@@ -276,6 +283,11 @@ def update_record(record_id: int, data: Dict) -> Tuple[bool, str, Optional[Dict]
         cursor.execute("SELECT * FROM schedule_records WHERE id = ?", (record_id,))
         row = cursor.fetchone()
         conn.close()
+        
+        refresh_all_affected_archives(data["planned_start"])
+        if old_planned_start and old_planned_start != data["planned_start"]:
+            refresh_all_affected_archives(old_planned_start)
+        
         return True, "更新成功", dict(row) if row else None
     except Exception as e:
         conn.close()
@@ -286,10 +298,18 @@ def delete_record(record_id: int) -> Tuple[bool, str]:
     conn = get_connection()
     try:
         cursor = conn.cursor()
+        cursor.execute("SELECT planned_start FROM schedule_records WHERE id = ?", (record_id,))
+        old_row = cursor.fetchone()
+        old_planned_start = old_row["planned_start"] if old_row else None
+        
         cursor.execute("DELETE FROM schedule_records WHERE id = ?", (record_id,))
         conn.commit()
         _refresh_review_alerts(conn)
         conn.close()
+        
+        if old_planned_start:
+            refresh_all_affected_archives(old_planned_start)
+        
         return True, "删除成功"
     except Exception as e:
         conn.close()
@@ -463,6 +483,10 @@ def update_handling_info(
     conn = get_connection()
     try:
         cursor = conn.cursor()
+        cursor.execute("SELECT planned_start FROM schedule_records WHERE id = ?", (record_id,))
+        old_row = cursor.fetchone()
+        planned_start = old_row["planned_start"] if old_row else None
+        
         cursor.execute("""
             UPDATE schedule_records SET
                 handling_status = ?,
@@ -474,6 +498,10 @@ def update_handling_info(
         """, (handling_status, responsible_person, completion_time, review_conclusion, record_id))
         conn.commit()
         conn.close()
+        
+        if planned_start:
+            refresh_all_affected_archives(planned_start)
+        
         return True, "更新成功"
     except Exception as e:
         conn.close()
@@ -791,3 +819,72 @@ def delete_archive(archive_id: int) -> Tuple[bool, str]:
     except Exception as e:
         conn.close()
         return False, f"归档删除失败: {str(e)}"
+
+
+def refresh_archives_for_month(archive_month: str):
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM monthly_archives WHERE archive_month = ?", (archive_month,))
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return
+        
+        archive_id = row["id"]
+        summary = get_monthly_summary_data(archive_month)
+        
+        cursor.execute("""
+            UPDATE monthly_archives SET
+                total_shows = ?,
+                serious_deviation_count = ?,
+                main_deviation_reason = ?,
+                hall_completion_rates = ?,
+                unclosed_count = ?,
+                deviation_reason_summary = ?
+            WHERE id = ?
+        """, (
+            summary["total_shows"],
+            summary["serious_deviation_count"],
+            summary["main_deviation_reason"],
+            json.dumps(summary["hall_completion_rates"], ensure_ascii=False),
+            summary["unclosed_count"],
+            json.dumps(summary["deviation_reason_summary"], ensure_ascii=False),
+            archive_id
+        ))
+        conn.commit()
+        conn.close()
+    except Exception:
+        if conn:
+            conn.close()
+
+
+def refresh_all_affected_archives(planned_start: str):
+    try:
+        month_str = datetime.fromisoformat(planned_start).strftime("%Y-%m")
+        refresh_archives_for_month(month_str)
+    except (ValueError, TypeError):
+        pass
+
+
+def get_records_by_month(archive_month: str) -> List[Dict]:
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    start_date = f"{archive_month}-01"
+    if archive_month.endswith("-12"):
+        next_year = int(archive_month[:4]) + 1
+        end_date = f"{next_year}-01-01"
+    else:
+        year = int(archive_month[:4])
+        month = int(archive_month[5:7]) + 1
+        end_date = f"{year:04d}-{month:02d}-01"
+    
+    cursor.execute("""
+        SELECT * FROM schedule_records
+        WHERE DATE(planned_start) >= ? AND DATE(planned_start) < ?
+        ORDER BY planned_start DESC
+    """, (start_date, end_date))
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
