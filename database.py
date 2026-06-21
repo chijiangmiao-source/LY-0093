@@ -74,6 +74,16 @@ def init_db():
         )
     """)
     
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS dashboard_schemes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            filters_json TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
     conn.commit()
     conn.close()
 
@@ -888,3 +898,180 @@ def get_records_by_month(archive_month: str) -> List[Dict]:
     rows = cursor.fetchall()
     conn.close()
     return [dict(row) for row in rows]
+
+
+def get_all_dashboard_schemes() -> List[Dict]:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM dashboard_schemes ORDER BY updated_at DESC")
+    rows = cursor.fetchall()
+    conn.close()
+    results = []
+    for row in rows:
+        r = dict(row)
+        r["filters"] = json.loads(r["filters_json"]) if r["filters_json"] else {}
+        results.append(r)
+    return results
+
+
+def get_dashboard_scheme(scheme_id: int) -> Optional[Dict]:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM dashboard_schemes WHERE id = ?", (scheme_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        r = dict(row)
+        r["filters"] = json.loads(r["filters_json"]) if r["filters_json"] else {}
+        return r
+    return None
+
+
+def create_dashboard_scheme(name: str, filters: Dict) -> Tuple[bool, str, Optional[Dict]]:
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM dashboard_schemes WHERE name = ?", (name,))
+        if cursor.fetchone():
+            conn.close()
+            return False, "看板方案名称已存在", None
+        filters_json = json.dumps(filters, ensure_ascii=False)
+        cursor.execute("""
+            INSERT INTO dashboard_schemes (name, filters_json)
+            VALUES (?, ?)
+        """, (name, filters_json))
+        conn.commit()
+        scheme_id = cursor.lastrowid
+        cursor.execute("SELECT * FROM dashboard_schemes WHERE id = ?", (scheme_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            r = dict(row)
+            r["filters"] = json.loads(r["filters_json"]) if r["filters_json"] else {}
+            return True, "创建成功", r
+        return False, "创建失败", None
+    except Exception as e:
+        conn.close()
+        return False, f"创建失败: {str(e)}", None
+
+
+def update_dashboard_scheme(scheme_id: int, name: str = None, filters: Dict = None) -> Tuple[bool, str, Optional[Dict]]:
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM dashboard_schemes WHERE id = ?", (scheme_id,))
+        if not cursor.fetchone():
+            conn.close()
+            return False, "看板方案不存在", None
+        if name:
+            cursor.execute("SELECT id FROM dashboard_schemes WHERE name = ? AND id != ?", (name, scheme_id))
+            if cursor.fetchone():
+                conn.close()
+                return False, "看板方案名称已存在", None
+        if name:
+            cursor.execute("""
+                UPDATE dashboard_schemes SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?
+            """, (name, scheme_id))
+        if filters is not None:
+            filters_json = json.dumps(filters, ensure_ascii=False)
+            cursor.execute("""
+                UPDATE dashboard_schemes SET filters_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?
+            """, (filters_json, scheme_id))
+        conn.commit()
+        cursor.execute("SELECT * FROM dashboard_schemes WHERE id = ?", (scheme_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            r = dict(row)
+            r["filters"] = json.loads(r["filters_json"]) if r["filters_json"] else {}
+            return True, "更新成功", r
+        return False, "更新失败", None
+    except Exception as e:
+        conn.close()
+        return False, f"更新失败: {str(e)}", None
+
+
+def delete_dashboard_scheme(scheme_id: int) -> Tuple[bool, str]:
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM dashboard_schemes WHERE id = ?", (scheme_id,))
+        conn.commit()
+        conn.close()
+        return True, "删除成功"
+    except Exception as e:
+        conn.close()
+        return False, f"删除失败: {str(e)}"
+
+
+def get_daily_trend_with_filters(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    hall_no: Optional[str] = None,
+    movie_name: Optional[str] = None,
+    handling_status: Optional[str] = None,
+    deviation_reason: Optional[str] = None
+) -> List[Dict]:
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    query = """
+        SELECT DATE(planned_start) as date,
+               COUNT(*) as count,
+               AVG(ABS(deviation_minutes)) as avg_deviation,
+               SUM(CASE WHEN ABS(deviation_minutes) > 15 THEN 1 ELSE 0 END) as serious_count
+        FROM schedule_records
+        WHERE 1=1
+    """
+    params = []
+    
+    if start_date:
+        query += " AND DATE(planned_start) >= ?"
+        params.append(start_date)
+    if end_date:
+        query += " AND DATE(planned_start) <= ?"
+        params.append(end_date)
+    if hall_no:
+        query += " AND hall_no = ?"
+        params.append(hall_no)
+    if movie_name:
+        query += " AND movie_name LIKE ?"
+        params.append(f"%{movie_name}%")
+    if handling_status:
+        query += " AND handling_status = ?"
+        params.append(handling_status)
+    if deviation_reason:
+        query += " AND deviation_reason LIKE ?"
+        params.append(f"%{deviation_reason}%")
+    
+    query += " GROUP BY DATE(planned_start) ORDER BY date DESC LIMIT 60"
+    
+    cursor.execute(query, params)
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def get_dashboard_summary(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    hall_no: Optional[str] = None,
+    movie_name: Optional[str] = None,
+    handling_status: Optional[str] = None,
+    deviation_reason: Optional[str] = None
+) -> Dict:
+    records = get_records_with_filters(start_date, end_date, hall_no, movie_name, handling_status, deviation_reason)
+    
+    total = len(records)
+    serious_count = sum(1 for r in records if abs(r["deviation_minutes"]) > 15)
+    completed_count = sum(1 for r in records if r.get("handling_status") == "已完成")
+    unclosed_count = sum(1 for r in records if r.get("handling_status") in ("待处理", "处理中", None, ""))
+    completion_rate = round(completed_count * 100.0 / total, 2) if total > 0 else 0
+    
+    return {
+        "total": total,
+        "serious_count": serious_count,
+        "completion_rate": completion_rate,
+        "unclosed_count": unclosed_count,
+        "completed_count": completed_count
+    }

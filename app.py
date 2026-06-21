@@ -11,7 +11,10 @@ from database import (
     get_hall_completion_rate, get_reason_handling_time, get_incomplete_records,
     get_handling_trend, get_handling_statistics, create_monthly_archive,
     get_all_archives, get_archive_by_id, get_archive_by_month, delete_archive,
-    get_monthly_summary_data, get_records_by_month
+    get_monthly_summary_data, get_records_by_month,
+    get_all_dashboard_schemes, get_dashboard_scheme, create_dashboard_scheme,
+    update_dashboard_scheme, delete_dashboard_scheme, get_daily_trend_with_filters,
+    get_dashboard_summary
 )
 
 
@@ -46,13 +49,16 @@ def main(page: ft.Page):
     closure_editing_record_id = None
     current_archive_tab = "list"
     selected_archive_id = None
+    current_dashboard_scheme_id = None
 
-    def switch_view(view, record_id=None, hall=None, closure_edit_id=None, archive_tab=None, archive_id=None):
-        nonlocal current_view, editing_record_id, selected_hall, closure_editing_record_id, current_archive_tab, selected_archive_id
+    def switch_view(view, record_id=None, hall=None, closure_edit_id=None, archive_tab=None, archive_id=None, dashboard_scheme_id=None):
+        nonlocal current_view, editing_record_id, selected_hall, closure_editing_record_id, current_archive_tab, selected_archive_id, current_dashboard_scheme_id
         current_view = view
         editing_record_id = record_id
         selected_hall = hall
         closure_editing_record_id = closure_edit_id
+        if dashboard_scheme_id is not None:
+            current_dashboard_scheme_id = dashboard_scheme_id
         if archive_tab:
             current_archive_tab = archive_tab
         if archive_id is not None:
@@ -114,6 +120,12 @@ def main(page: ft.Page):
                     icon=ft.icons.ARCHIVE,
                     tooltip="数据导出与月度归档",
                     on_click=lambda e: switch_view("export_archive"),
+                    icon_color=ft.colors.WHITE
+                ),
+                ft.IconButton(
+                    icon=ft.icons.INSIGHTS,
+                    tooltip="多维报表与自定义看板",
+                    on_click=lambda e: switch_view("dashboard"),
                     icon_color=ft.colors.WHITE
                 ),
             ]
@@ -1689,6 +1701,556 @@ def main(page: ft.Page):
         
         return content
 
+    def build_dashboard_view():
+        nonlocal current_dashboard_scheme_id
+        halls = get_all_halls()
+        handling_statuses = ["全部", "待处理", "处理中", "已完成"]
+        
+        filter_start_date = ft.TextField(label="开始日期 (YYYY-MM-DD)", width=200)
+        filter_end_date = ft.TextField(label="结束日期 (YYYY-MM-DD)", width=200)
+        filter_hall = ft.Dropdown(
+            label="选择影厅",
+            width=160,
+            value="全部",
+            options=[ft.dropdown.Option("全部")] + [ft.dropdown.Option(h) for h in halls]
+        )
+        filter_movie = ft.TextField(label="影片名称", width=200)
+        filter_reason = ft.Dropdown(
+            label="偏差原因",
+            width=180,
+            value="全部",
+            options=[ft.dropdown.Option("全部")] + [ft.dropdown.Option(r) for r in DEVIATION_REASONS]
+        )
+        filter_status = ft.Dropdown(
+            label="处理状态",
+            width=140,
+            value="全部",
+            options=[ft.dropdown.Option(s) for s in handling_statuses]
+        )
+        
+        summary_cards = ft.Row([], spacing=15, scroll=ft.ScrollMode.AUTO)
+        trend_chart = ft.Container()
+        detail_table = ft.Container()
+        scheme_list_view = ft.Column([], spacing=5, scroll=ft.ScrollMode.AUTO)
+        current_scheme_name_text = ft.Text("默认看板", size=18, weight=ft.FontWeight.BOLD)
+        last_filtered_records = []
+        
+        def get_status_color(status):
+            if status == "已完成":
+                return ft.colors.GREEN
+            elif status == "处理中":
+                return ft.colors.ORANGE
+            else:
+                return ft.colors.RED
+        
+        def get_current_filters():
+            return {
+                "start_date": filter_start_date.value.strip() if filter_start_date.value.strip() else None,
+                "end_date": filter_end_date.value.strip() if filter_end_date.value.strip() else None,
+                "hall_no": filter_hall.value if filter_hall.value and filter_hall.value != "全部" else None,
+                "movie_name": filter_movie.value.strip() if filter_movie.value.strip() else None,
+                "deviation_reason": filter_reason.value if filter_reason.value and filter_reason.value != "全部" else None,
+                "handling_status": filter_status.value if filter_status.value and filter_status.value != "全部" else None,
+            }
+        
+        def apply_filters(filters):
+            if filters.get("start_date"):
+                filter_start_date.value = filters["start_date"]
+            else:
+                filter_start_date.value = ""
+            if filters.get("end_date"):
+                filter_end_date.value = filters["end_date"]
+            else:
+                filter_end_date.value = ""
+            if filters.get("hall_no"):
+                filter_hall.value = filters["hall_no"]
+            else:
+                filter_hall.value = "全部"
+            if filters.get("movie_name"):
+                filter_movie.value = filters["movie_name"]
+            else:
+                filter_movie.value = ""
+            if filters.get("deviation_reason"):
+                filter_reason.value = filters["deviation_reason"]
+            else:
+                filter_reason.value = "全部"
+            if filters.get("handling_status"):
+                filter_status.value = filters["handling_status"]
+            else:
+                filter_status.value = "全部"
+        
+        def refresh_scheme_list():
+            schemes = get_all_dashboard_schemes()
+            scheme_items = []
+            for s in schemes:
+                is_active = current_dashboard_scheme_id == s["id"]
+                scheme_items.append(
+                    ft.Container(
+                        content=ft.Row([
+                            ft.Icon(ft.icons.DASHBOARD, size=16, 
+                                    color=ft.colors.BLUE_700 if is_active else ft.colors.GREY_600),
+                            ft.Text(s["name"], size=13, 
+                                    weight=ft.FontWeight.BOLD if is_active else ft.FontWeight.NORMAL,
+                                    color=ft.colors.BLUE_700 if is_active else ft.colors.BLACK87),
+                            ft.Container(expand=True),
+                            ft.IconButton(
+                                ft.icons.EDIT,
+                                icon_size=16,
+                                tooltip="重命名",
+                                on_click=lambda e, sid=s["id"], sname=s["name"]: open_rename_dialog(sid, sname)
+                            ),
+                            ft.IconButton(
+                                ft.icons.DELETE,
+                                icon_size=16,
+                                tooltip="删除",
+                                icon_color=ft.colors.RED,
+                                on_click=lambda e, sid=s["id"]: handle_delete_scheme(sid)
+                            ),
+                        ]),
+                        padding=ft.padding.symmetric(horizontal=8, vertical=4),
+                        bgcolor=ft.colors.BLUE_50 if is_active else ft.colors.TRANSPARENT,
+                        border_radius=6,
+                        on_click=lambda e, sid=s["id"]: load_scheme(sid),
+                    )
+                )
+            if not scheme_items:
+                scheme_items.append(
+                    ft.Text("暂无看板方案", size=12, color=ft.colors.GREY_600)
+                )
+            scheme_list_view.controls = scheme_items
+            page.update()
+        
+        def load_scheme(scheme_id):
+            nonlocal current_dashboard_scheme_id
+            scheme = get_dashboard_scheme(scheme_id)
+            if scheme:
+                current_dashboard_scheme_id = scheme_id
+                current_scheme_name_text.value = scheme["name"]
+                apply_filters(scheme["filters"])
+                refresh_scheme_list()
+                load_dashboard_data()
+        
+        def open_create_dialog(e):
+            name_field = ft.TextField(label="看板方案名称", width=300, value="")
+            
+            def handle_create(ev):
+                name = name_field.value.strip()
+                if not name:
+                    show_snackbar("请输入看板方案名称", ft.colors.RED)
+                    return
+                filters = get_current_filters()
+                success, msg, _ = create_dashboard_scheme(name, filters)
+                show_snackbar(msg, ft.colors.GREEN if success else ft.colors.RED)
+                if success:
+                    dialog.open = False
+                    page.update()
+                    schemes = get_all_dashboard_schemes()
+                    if schemes:
+                        load_scheme(schemes[0]["id"])
+            
+            dialog = ft.AlertDialog(
+                title=ft.Text("创建看板方案"),
+                content=ft.Column([
+                    ft.Text("将当前筛选条件保存为看板方案：", size=13, color=ft.colors.GREY_700),
+                    name_field,
+                ], spacing=10, tight=True),
+                actions=[
+                    ft.TextButton("取消", on_click=lambda e: setattr(dialog, 'open', False) or page.update()),
+                    ft.ElevatedButton("创建", on_click=handle_create, bgcolor=ft.colors.BLUE_700, color=ft.colors.WHITE),
+                ],
+                actions_alignment=ft.MainAxisAlignment.END
+            )
+            page.dialog = dialog
+            dialog.open = True
+            page.update()
+        
+        def open_rename_dialog(scheme_id, current_name):
+            name_field = ft.TextField(label="看板方案名称", width=300, value=current_name)
+            
+            def handle_rename(ev):
+                name = name_field.value.strip()
+                if not name:
+                    show_snackbar("请输入看板方案名称", ft.colors.RED)
+                    return
+                success, msg, _ = update_dashboard_scheme(scheme_id, name=name)
+                show_snackbar(msg, ft.colors.GREEN if success else ft.colors.RED)
+                if success:
+                    dialog.open = False
+                    page.update()
+                    if current_dashboard_scheme_id == scheme_id:
+                        current_scheme_name_text.value = name
+                    refresh_scheme_list()
+            
+            dialog = ft.AlertDialog(
+                title=ft.Text("重命名看板方案"),
+                content=ft.Column([name_field], spacing=10, tight=True),
+                actions=[
+                    ft.TextButton("取消", on_click=lambda e: setattr(dialog, 'open', False) or page.update()),
+                    ft.ElevatedButton("保存", on_click=handle_rename, bgcolor=ft.colors.BLUE_700, color=ft.colors.WHITE),
+                ],
+                actions_alignment=ft.MainAxisAlignment.END
+            )
+            page.dialog = dialog
+            dialog.open = True
+            page.update()
+        
+        def handle_delete_scheme(scheme_id):
+            def confirm_delete(ev):
+                success, msg = delete_dashboard_scheme(scheme_id)
+                show_snackbar(msg, ft.colors.GREEN if success else ft.colors.RED)
+                dialog.open = False
+                page.update()
+                if success and current_dashboard_scheme_id == scheme_id:
+                    current_dashboard_scheme_id = None
+                    current_scheme_name_text.value = "默认看板"
+                    reset_filters(None)
+                refresh_scheme_list()
+            
+            dialog = ft.AlertDialog(
+                title=ft.Text("确认删除"),
+                content=ft.Text("确定要删除这个看板方案吗？此操作不可撤销。"),
+                actions=[
+                    ft.TextButton("取消", on_click=lambda e: setattr(dialog, 'open', False) or page.update()),
+                    ft.TextButton("删除", on_click=confirm_delete, style=ft.ButtonStyle(color=ft.colors.RED)),
+                ],
+                actions_alignment=ft.MainAxisAlignment.END
+            )
+            page.dialog = dialog
+            dialog.open = True
+            page.update()
+        
+        def handle_save_current(e):
+            if not current_dashboard_scheme_id:
+                open_create_dialog(e)
+                return
+            filters = get_current_filters()
+            success, msg, _ = update_dashboard_scheme(current_dashboard_scheme_id, filters=filters)
+            show_snackbar(msg, ft.colors.GREEN if success else ft.colors.RED)
+        
+        def load_dashboard_data(e=None):
+            nonlocal last_filtered_records
+            start_date = filter_start_date.value.strip() if filter_start_date.value.strip() else None
+            end_date = filter_end_date.value.strip() if filter_end_date.value.strip() else None
+            
+            if start_date:
+                try:
+                    datetime.strptime(start_date, "%Y-%m-%d")
+                except ValueError:
+                    show_snackbar("日期格式不对，开始日期请使用 YYYY-MM-DD 格式", ft.colors.RED)
+                    return
+            if end_date:
+                try:
+                    datetime.strptime(end_date, "%Y-%m-%d")
+                except ValueError:
+                    show_snackbar("日期格式不对，结束日期请使用 YYYY-MM-DD 格式", ft.colors.RED)
+                    return
+            
+            hall = filter_hall.value if filter_hall.value and filter_hall.value != "全部" else None
+            movie = filter_movie.value.strip() if filter_movie.value.strip() else None
+            reason = filter_reason.value if filter_reason.value and filter_reason.value != "全部" else None
+            status = filter_status.value if filter_status.value and filter_status.value != "全部" else None
+            
+            summary = get_dashboard_summary(start_date, end_date, hall, movie, status, reason)
+            trend_data = get_daily_trend_with_filters(start_date, end_date, hall, movie, status, reason)
+            records = get_records_with_filters(start_date, end_date, hall, movie, status, reason)
+            last_filtered_records = records
+            
+            summary_cards.controls = [
+                ft.Container(
+                    content=ft.Column([
+                        ft.Text("总记录数", size=12, color=ft.colors.GREY_600),
+                        ft.Text(str(summary["total"]), size=28, weight=ft.FontWeight.BOLD, color=ft.colors.BLUE_700),
+                    ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                    padding=20,
+                    bgcolor=ft.colors.BLUE_50,
+                    border_radius=10,
+                    width=150,
+                ),
+                ft.Container(
+                    content=ft.Column([
+                        ft.Text("严重偏差", size=12, color=ft.colors.GREY_600),
+                        ft.Text(str(summary["serious_count"]), size=28, weight=ft.FontWeight.BOLD, color=ft.colors.RED),
+                    ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                    padding=20,
+                    bgcolor=ft.colors.RED_50,
+                    border_radius=10,
+                    width=150,
+                ),
+                ft.Container(
+                    content=ft.Column([
+                        ft.Text("闭环完成率", size=12, color=ft.colors.GREY_600),
+                        ft.Text(f"{summary['completion_rate']:.1f}%", size=28, weight=ft.FontWeight.BOLD, color=ft.colors.GREEN),
+                    ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                    padding=20,
+                    bgcolor=ft.colors.GREEN_50,
+                    border_radius=10,
+                    width=160,
+                ),
+                ft.Container(
+                    content=ft.Column([
+                        ft.Text("未闭环数", size=12, color=ft.colors.GREY_600),
+                        ft.Text(str(summary["unclosed_count"]), size=28, weight=ft.FontWeight.BOLD, color=ft.colors.ORANGE),
+                    ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                    padding=20,
+                    bgcolor=ft.colors.ORANGE_50,
+                    border_radius=10,
+                    width=150,
+                ),
+            ]
+            
+            if trend_data:
+                df_trend = pd.DataFrame(trend_data)
+                df_trend = df_trend.sort_values("date")
+                fig_trend = px.line(
+                    df_trend,
+                    x="date",
+                    y=["count", "serious_count"],
+                    title="偏差趋势图",
+                    markers=True,
+                    color_discrete_sequence=["#1976D2", "#E53935"],
+                    labels={"count": "总记录数", "serious_count": "严重偏差数"}
+                )
+                fig_trend.update_layout(
+                    xaxis_title="日期",
+                    yaxis_title="记录数",
+                    title_font_size=16,
+                    legend_title="",
+                    height=350,
+                )
+                trend_chart.content = ft.Plot(
+                    data=fig_trend.data,
+                    layout=fig_trend.layout,
+                    expand=True
+                )
+            else:
+                trend_chart.content = ft.Text("暂无趋势数据", size=14, color=ft.colors.GREY_600)
+            
+            if records:
+                columns = [
+                    ft.DataColumn(ft.Text("记录编号", weight=ft.FontWeight.BOLD)),
+                    ft.DataColumn(ft.Text("影片名称", weight=ft.FontWeight.BOLD)),
+                    ft.DataColumn(ft.Text("影厅", weight=ft.FontWeight.BOLD)),
+                    ft.DataColumn(ft.Text("计划开场", weight=ft.FontWeight.BOLD)),
+                    ft.DataColumn(ft.Text("偏差(分钟)", weight=ft.FontWeight.BOLD)),
+                    ft.DataColumn(ft.Text("偏差原因", weight=ft.FontWeight.BOLD)),
+                    ft.DataColumn(ft.Text("处理状态", weight=ft.FontWeight.BOLD)),
+                    ft.DataColumn(ft.Text("责任人", weight=ft.FontWeight.BOLD)),
+                ]
+                rows = []
+                for rec in records:
+                    deviation_color = ft.colors.RED if abs(rec["deviation_minutes"]) > 15 else (
+                        ft.colors.ORANGE if rec["deviation_minutes"] != 0 else ft.colors.GREEN
+                    )
+                    rec_status = rec.get("handling_status") or "待处理"
+                    status_color = get_status_color(rec_status)
+                    rows.append(
+                        ft.DataRow(
+                            cells=[
+                                ft.DataCell(ft.Text(rec["record_no"])),
+                                ft.DataCell(ft.Text(rec["movie_name"])),
+                                ft.DataCell(ft.Text(rec["hall_no"])),
+                                ft.DataCell(ft.Text(format_datetime(rec["planned_start"]))),
+                                ft.DataCell(ft.Text(str(rec["deviation_minutes"]), color=deviation_color, weight=ft.FontWeight.BOLD)),
+                                ft.DataCell(ft.Text(rec["deviation_reason"] or "-")),
+                                ft.DataCell(
+                                    ft.Container(
+                                        content=ft.Text(rec_status, color=ft.colors.WHITE, size=12, weight=ft.FontWeight.BOLD),
+                                        padding=ft.padding.symmetric(horizontal=8, vertical=4),
+                                        bgcolor=status_color,
+                                        border_radius=4,
+                                    )
+                                ),
+                                ft.DataCell(ft.Text(rec.get("responsible_person") or "-")),
+                            ]
+                        )
+                    )
+                detail_table.content = ft.Column([
+                    ft.Text(f"明细数据（共 {len(records)} 条）", size=16, weight=ft.FontWeight.BOLD),
+                    ft.Container(
+                        content=ft.DataTable(
+                            columns=columns,
+                            rows=rows,
+                            horizontal_lines=ft.BorderSide(1, ft.colors.GREY_300),
+                            heading_row_color=ft.colors.BLUE_50,
+                            show_bottom_border=True,
+                        ),
+                        expand=True
+                    )
+                ], spacing=10)
+            else:
+                detail_table.content = ft.Text("暂无符合条件的记录", size=14, color=ft.colors.GREY_600)
+            
+            page.update()
+        
+        def reset_filters(e):
+            nonlocal current_dashboard_scheme_id
+            current_dashboard_scheme_id = None
+            current_scheme_name_text.value = "默认看板"
+            filter_start_date.value = ""
+            filter_end_date.value = ""
+            filter_hall.value = "全部"
+            filter_movie.value = ""
+            filter_reason.value = "全部"
+            filter_status.value = "全部"
+            refresh_scheme_list()
+            load_dashboard_data()
+        
+        def export_dashboard(e):
+            nonlocal last_filtered_records
+            if not last_filtered_records:
+                show_snackbar("请先查询数据后再导出", ft.colors.ORANGE)
+                return
+            
+            try:
+                export_data = []
+                for rec in last_filtered_records:
+                    export_data.append({
+                        "记录编号": rec["record_no"],
+                        "影片名称": rec["movie_name"],
+                        "影厅": rec["hall_no"],
+                        "计划开场时间": format_datetime(rec["planned_start"]),
+                        "实际开场时间": format_datetime(rec["actual_start"]),
+                        "偏差(分钟)": rec["deviation_minutes"],
+                        "偏差原因": rec["deviation_reason"] or "",
+                        "是否影响下一场": "是" if rec["affects_next"] else "否",
+                        "受影响场次编号": rec.get("affected_record_no", "") or "",
+                        "调整建议": rec.get("adjustment_suggestion", "") or "",
+                        "复查提醒": "是" if rec.get("review_alert") else "否",
+                        "处理状态": rec.get("handling_status", "待处理") or "待处理",
+                        "责任人": rec.get("responsible_person", "") or "",
+                        "处理完成时间": format_datetime(rec.get("completion_time")) or "",
+                        "复盘结论": rec.get("review_conclusion", "") or "",
+                    })
+                
+                df = pd.DataFrame(export_data)
+                
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                scheme_name = current_scheme_name_text.value if current_dashboard_scheme_id else "看板"
+                filename = f"看板_{scheme_name}_{timestamp}.xlsx"
+                export_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
+                
+                with pd.ExcelWriter(export_path, engine="openpyxl") as writer:
+                    df.to_excel(writer, index=False, sheet_name="看板数据")
+                    
+                    worksheet = writer.sheets["看板数据"]
+                    for idx, col in enumerate(df.columns):
+                        max_len = max(
+                            df[col].astype(str).map(len).max(),
+                            len(col)
+                        ) + 2
+                        worksheet.column_dimensions[chr(65 + idx) if idx < 26 else "A" + chr(65 + idx - 26)].width = min(max_len, 30)
+                
+                show_snackbar(f"导出成功！文件已保存至：{export_path}", ft.colors.GREEN)
+            except Exception as ex:
+                show_snackbar(f"导出失败：{str(ex)}", ft.colors.RED)
+        
+        search_btn = ft.ElevatedButton(
+            "查询",
+            icon=ft.icons.SEARCH,
+            bgcolor=ft.colors.BLUE_700,
+            color=ft.colors.WHITE,
+            on_click=load_dashboard_data
+        )
+        reset_btn = ft.OutlinedButton(
+            "重置",
+            icon=ft.icons.REFRESH,
+            on_click=reset_filters
+        )
+        export_btn = ft.ElevatedButton(
+            "导出 Excel",
+            icon=ft.icons.DOWNLOAD,
+            bgcolor=ft.colors.GREEN_700,
+            color=ft.colors.WHITE,
+            on_click=export_dashboard
+        )
+        save_btn = ft.ElevatedButton(
+            "保存方案",
+            icon=ft.icons.SAVE,
+            bgcolor=ft.colors.PURPLE_700,
+            color=ft.colors.WHITE,
+            on_click=handle_save_current
+        )
+        new_scheme_btn = ft.ElevatedButton(
+            "新建方案",
+            icon=ft.icons.ADD,
+            bgcolor=ft.colors.TEAL_700,
+            color=ft.colors.WHITE,
+            on_click=open_create_dialog
+        )
+        
+        refresh_scheme_list()
+        load_dashboard_data()
+        
+        sidebar = ft.Container(
+            content=ft.Column([
+                ft.Row([
+                    ft.Icon(ft.icons.FOLDER, color=ft.colors.BLUE_700, size=20),
+                    ft.Text("看板方案", size=16, weight=ft.FontWeight.BOLD),
+                ]),
+                ft.Divider(height=5),
+                scheme_list_view,
+                ft.Divider(),
+                ft.Row([new_scheme_btn], alignment=ft.MainAxisAlignment.CENTER),
+            ], spacing=10),
+            width=260,
+            padding=15,
+            bgcolor=ft.colors.GREY_50,
+            border_radius=10,
+            border=ft.border.all(1, ft.colors.GREY_300),
+        )
+        
+        main_content = ft.Column([
+            ft.Row([
+                ft.Icon(ft.icons.INSIGHTS, color=ft.colors.INDIGO_700, size=30),
+                current_scheme_name_text,
+                ft.Container(expand=True),
+                ft.OutlinedButton("返回列表", icon=ft.icons.ARROW_BACK, on_click=lambda e: switch_view("list")),
+            ], alignment=ft.MainAxisAlignment.START),
+            ft.Divider(),
+            ft.Container(
+                content=ft.Column([
+                    ft.Row([
+                        filter_start_date,
+                        filter_end_date,
+                        filter_hall,
+                        filter_movie,
+                    ], spacing=15, wrap=True),
+                    ft.Row([
+                        filter_reason,
+                        filter_status,
+                    ], spacing=15, wrap=True),
+                    ft.Row([search_btn, reset_btn, save_btn, export_btn, ft.Container(expand=True)], spacing=15),
+                ], spacing=10),
+                padding=20,
+                bgcolor=ft.colors.GREY_50,
+                border_radius=10,
+            ),
+            ft.Divider(),
+            summary_cards,
+            ft.Divider(),
+            ft.Container(
+                content=trend_chart,
+                padding=10,
+                bgcolor=ft.colors.WHITE,
+                border_radius=10,
+                border=ft.border.all(1, ft.colors.GREY_300),
+                height=400,
+            ),
+            ft.Divider(),
+            ft.Container(
+                content=detail_table,
+                padding=15,
+                bgcolor=ft.colors.WHITE,
+                border_radius=10,
+                border=ft.border.all(1, ft.colors.GREY_300),
+                expand=True,
+            ),
+        ], expand=True, spacing=15, scroll=ft.ScrollMode.AUTO)
+        
+        content = ft.Row([sidebar, main_content], expand=True, spacing=20)
+        
+        return content
+
     def build_monthly_archive_view():
         nonlocal current_archive_tab, selected_archive_id
         
@@ -2297,6 +2859,8 @@ def main(page: ft.Page):
             page.add(build_closure_stats_view())
         elif current_view == "export_archive":
             page.add(build_monthly_archive_view())
+        elif current_view == "dashboard":
+            page.add(build_dashboard_view())
 
         page.update()
 
